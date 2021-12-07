@@ -867,7 +867,7 @@ Nnetar <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
           x.future <-trig.matrix$trig.seasonality.future
         }
       }
-
+    }
     nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training, xreg=x.reg))
 
     fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
