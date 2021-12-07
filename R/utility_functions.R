@@ -176,5 +176,3 @@ regressor_coefficients <- function(m){
 
   return(df)
 }
-
-
