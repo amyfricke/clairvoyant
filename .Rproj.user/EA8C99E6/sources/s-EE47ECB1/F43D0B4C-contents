@@ -1,0 +1,22 @@
+data(events.schedule)
+data(pineapple.sales)
+pineapple.sales$date <- as.Date(pineapple.sales$date)
+event.parameters <- EventParameters(events.schedule=events.schedule,
+                                    weeks.before=10,
+                                    days.before=1, days.after=1,
+                                    forecast.method='Arima011')
+disaggregation.parameters <- DisaggregationParameters(get.pred.int=T)
+pineapple.clairvoyant <- 
+  Clairvoyant(pineapple.sales, 
+              missing.fill=NA,
+              training.end.date=as.Date('2019-03-02'), 
+              forecast.end.date=as.Date('2019-11-21'),
+              event.parameters=event.parameters,
+              transform='Box_Cox',
+              disaggregation.parameters=disaggregation.parameters,
+              models=c("StlElm", "Bsts", "HWinters", "Nnetar", "StlMlp", "AutoArima"),
+              consensus.method='median')
+summary(pineapple.clairvoyant$evaluation$weekly)
+summary(pineapple.clairvoyant$evaluation$daily)
+
+PlotForecastEnsemble(pineapple.clairvoyant)

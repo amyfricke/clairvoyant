@@ -1,0 +1,110 @@
+library(zoo)
+# Simulate a time series with some intervention applied at some point in time
+# Also simulate a control time series with no intervention applied
+ii.dates <- seq(as.Date("2018-03-02"), as.Date("2021-03-16"), by=1)
+ii.len <- length(ii.dates)
+# Simulate baseline noise
+ii.ts <- rnorm(ii.len, 18, 3.7)
+# Simulate day of week effect (starts on a Friday)
+ii.ts <- ii.ts + rnorm(ii.len, c(2.5, 3.5, 4, -1.7, -1.8, -1.4), 0.2)
+# Simulate yearly seasonality
+ii.ts <- ii.ts + rnorm(ii.len, c(rep(1, 31), rep(0.5, 30), rep(-0.5, 31),
+                                 rep(-1.5, 30), rep(-2.5, 31), rep(-2, 31),
+                                 rep(2.4, 30), rep(-0.2, 31), rep(1.5, 30),
+                                 rep(-2.3, 31), rep(0.3, 31), rep(0.6, 28)),
+                       0.1)
+# Simulate a few holiday effects
+ii.thanks <- as.Date(c("2018-11-22", "2018-11-23", "2019-11-28", "2019-11-29",
+                       "2020-11-26", "2020-11-27"))
+ii.ts[ii.dates %in% ii.thanks] <-
+  ii.ts[ii.dates %in% ii.thanks] + rnorm(length(ii.thanks), c(7, 3), 0.4)
+
+ii.memorial <- as.Date(c("2018-05-28", "2019-05-27", "2020-05-27"))
+ii.ts[ii.dates %in% ii.memorial] <- ii.ts[ii.dates %in% ii.memorial] + rnorm(3, 3.4, 0.2)
+
+ii.mlk <- as.Date(c("2019-01-21", "2020-01-20", "2021-01-20"))
+ii.ts[ii.dates %in% ii.mlk] <- ii.ts[ii.dates %in% ii.mlk] + rnorm(3, 2.7, 0.1)
+
+holidays.df <- data.frame(date=c(ii.thanks[c(1,3,5)], ii.memorial, ii.mlk),
+                          event=rep(c("Thanksgiving", "MemorialDay", "MLKDay"), each=3))
+
+# Simulate a slow trend
+ii.ts <- ii.ts + rnorm(ii.len, 25 * c(1:ii.len) / ii.len, 0.01)
+
+# Keep this as the control series and then simulate the pandemic effect
+con.ts <- ii.ts ^ (2.3)
+
+p.dates <- (ii.dates >= as.Date("2020-03-16"))
+p.dates2 <- (ii.dates >= as.Date("2020-03-15"))
+p.len <- sum(p.dates)
+
+ii.ts[p.dates] <- ii.ts[p.dates] + rnorm(p.len, 23 * c(p.len:1) / p.len)
+ii.ts <- ii.ts ^ (2.3)
+
+# Simulate another time series with some intervention applied at the same point in time
+# Simulate baseline noise
+ii2.ts <- rnorm(ii.len, 10, 3.7)
+# Simulate day of week effect (starts on a Friday)
+ii2.ts <- ii2.ts + rnorm(ii.len, c(2.5, 3.5, 4, -1.7, -1.8, -1.4), 0.2)
+# Simulate yearly seasonality
+ii2.ts <- ii2.ts + rnorm(ii.len, c(rep(1, 31), rep(0.5, 30), rep(-0.5, 31),
+                                   rep(-1.5, 30), rep(-2.5, 31), rep(-2, 31),
+                                   rep(2.4, 30), rep(-0.2, 31), rep(1.5, 30),
+                                   rep(-2.3, 31), rep(0.3, 31), rep(0.6, 28)),
+                         0.1)
+
+# Simulate a slow trend
+ii2.ts <- ii2.ts + rnorm(ii.len, 25 * c(1:ii.len) / ii.len, 0.01)
+
+# Simulate a larger pandemic effect in both series
+p.dates <- (ii.dates >= as.Date("2020-03-16"))
+p.dates2 <- (ii.dates >= as.Date("2020-03-15"))
+p.len <- sum(p.dates)
+
+ii2.ts[p.dates] <- ii2.ts[p.dates] + rnorm(p.len, 46 * c(p.len:1) / p.len)
+ii2.ts <- ii2.ts ^ (2.3)
+
+
+ii.ts[p.dates] <- ii.ts[p.dates] + rnorm(p.len, 23 * c(p.len:1) / p.len)
+ii.ts <- ii.ts ^ (2.3)
+#plot(ts(con.ts), ylim=c(0, max(ii.ts)))
+#lines(ts(ii.ts[p.dates2], start=which(ii.dates == as.Date('2020-03-15'))), col='red')
+pandemic.usage <- data.frame(date=ii.dates, actual=ii.ts)
+pandemic.users <- data.frame(date=ii.dates, 
+                             actual=((na.locf(ii2.ts) + na.locf(ii2.ts, fromLast=T))/2))
+event.parameters <- EventParameters(events.schedule=holidays.df,
+                                    weeks.before=12,
+                                    days.before=0, days.after=1,
+                                    forecast.method='AutoArima')
+disaggregation.parameters <- DisaggregationParameters(get.pred.int=T)
+pandemic.clairvoyant <- 
+  Clairvoyant(pandemic.usage, 
+              missing.fill=NA,
+              training.end.date=as.Date('2020-03-09'), 
+              forecast.end.date=as.Date('2021-03-09'),
+              x.features=pandemic.users,
+              event.parameters=event.parameters,
+              transform='Box_Cox',
+              disaggregation.parameters=disaggregation.parameters,
+              models=c("Arima011", "Arima012"),
+              consensus.method='median')
+PlotForecastEnsemble(pandemic.clairvoyant)
+PlotTrainingActualAndForecast(pandemic.clairvoyant)
+PlotTrainingActualAndForecast(pandemic.clairvoyant, freq='daily', short.term=T,
+                              n.history=364, n.forecast=90)
+"StlElm", "Bsts", "HWinters", "Nnetar", "Arima012", 
+
+aggregation.parameters <- AggregationParameters(get.pred.int=T, aggregate.to.longest=TRUE,
+                                                periods.agg=c(7))
+pandemic.clairvoyant3 <- 
+  Clairvoyant(pandemic.usage, 
+              missing.fill=NA,
+              training.end.date=as.Date('2020-03-09'), 
+              forecast.end.date=as.Date('2021-03-09'),
+              x.features=pandemic.users,
+              event.parameters=event.parameters,
+              transform='Box_Cox',
+              aggregation.parameters=aggregation.parameters,
+              models=c("Arima011", "Bsts", "AutoArima", "Arima012"),
+              consensus.method='median')
+PlotForecastEnsemble(pandemic.clairvoyant3)

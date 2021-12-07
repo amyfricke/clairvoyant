@@ -1,0 +1,618 @@
+
+#' Function to get forecast error for the final daily and weekly forecasts and
+#'  booleans of whether the prediction interval covers the actual value
+#'
+#' @param daily.history: the full daily history (including dates that may be in
+#'   the forecast
+#' @param daily.forecast: the final daily forecast
+#' @param weekly.forecast: the final weekly forecast
+#' @param get.daily.pred.int: boolean indicating if there are daily prediction
+#'   intervals to be evaluated
+#' @return: list of dataframes containing forecast evaluation data
+EvaluateClairvoyant <- function(daily.history, daily.forecast,
+                                weekly.forecast, get.daily.pred.int) {
+  daily.eval <- subset(daily.history, date %in% daily.forecast$date)
+
+  if (nrow(daily.eval) < 7) return(NULL)
+
+  daily.eval$test <- 1
+
+  weekly.eval <-
+      AggregateToWeekly(daily.eval[1:(floor(nrow(daily.eval) / 7) * 7),],
+                        c("actual", "test"))
+  stopifnot(all(weekly.eval$test == 7))
+  weekly.eval$test <- NULL
+  daily.eval$test <- NULL
+
+  daily.eval <- merge(daily.eval, daily.forecast, by=c("date"))
+
+  weekly.eval <- merge(weekly.eval, weekly.forecast, by=c("date"))
+
+  daily.eval$error <-
+      (daily.eval$forecast - daily.eval$actual) / daily.eval$actual
+  weekly.eval$error <-
+      (weekly.eval$forecast - weekly.eval$actual) / weekly.eval$actual
+
+  weekly.eval$prediction.interval.coverage <-
+      (weekly.eval$actual >= weekly.eval$forecast.lower &
+       weekly.eval$actual <= weekly.eval$forecast.upper)
+
+
+  if (get.daily.pred.int) {
+    daily.eval$prediction.interval.coverage <-
+        (daily.eval$actual >= daily.eval$forecast.lower &
+         daily.eval$actual <= daily.eval$forecast.upper)
+  }
+  return(list(daily=daily.eval, weekly=weekly.eval))
+}
+
+#' Plot the resulting ensemble of models and the consensus forecast
+#'
+#' @param object: clairvoyant forecast object to plot ensemble
+#' @return: NULL< plot producted
+#' @export
+PlotForecastEnsemble <- function(object) {
+
+  training <- object$training$weekly$smoothed
+
+  training$type <- 'training'
+  type.levels <- c('training')
+
+  all <- training
+  forecast.list <- object$forecast$weekly$smoothed
+  for (model in ls(forecast.list)) {
+    model.forecast <- forecast.list[[model]]
+    colnames(model.forecast) <- c('date', 'actual', 'actual.lower',
+                                  'actual.upper')
+    model.forecast$type <- paste(model, 'forecast')
+    type.levels <- c(type.levels, paste(model, 'forecast'))
+    all <- rbind(all, model.forecast)
+  }
+  all$type <- factor(all$type, levels=type.levels)
+
+  min.year <- as.numeric(substr(min(all$date), 1, 4))
+  min.year <- min.year + (min(all$date) >=
+                          as.Date(paste(min.year, "-07-01", sep="")))
+  min.year <- as.Date(paste(min.year, "-01-01", sep=""))
+  max.year <- as.numeric(substr(max(all$date), 1, 4))
+  max.year <- max.year + (max(all$date) >=
+                          as.Date(paste(max.year, "-07-01", sep="")))
+  max.year <- as.Date(paste(max.year, "-01-01", sep=""))
+  datebreaks <- seq(min.year, max.year, by="year")
+  all$line.width <- 1 + (all$type == "consensus")
+
+  title.name <-
+      "Smoothed weekly aggregated training and forecast model ensemble"
+  p <- ggplot2::ggplot(data=all, ggplot2::aes(x=date, y=actual, color=type)) +
+       ggplot2::geom_line(size=all$line.width)
+  p <- p + ggplot2::scale_x_date(breaks=datebreaks,
+                                 labels=scales::date_format("%Y-%m-%d")) +
+      ggplot2::xlab("") + ggplot2::ylab("") +
+      ggplot2::ggtitle(title.name) +
+      ggplot2::theme(axis.text.x=ggplot2::element_text(size=15, face="bold"),
+                     axis.text.y=ggplot2::element_text(size=15, face="bold"),
+                     plot.title=ggplot2::element_text(size=20,
+                                                      vjust=2, face="bold"),
+                     legend.title=ggplot2::element_blank(),
+                     legend.text=ggplot2::element_text(size=15),
+                     legend.background=
+                     ggplot2::element_rect(fill = "transparent"),
+                     legend.key=ggplot2::element_rect(fill = "transparent"),
+                      legend.key.width=grid::unit(1.5, "cm")) +
+      ggplot2::theme(panel.border=ggplot2::element_blank(),
+                     panel.background=ggplot2::element_blank(),
+                     axis.line=ggplot2::element_line(color="grey"),
+                     panel.grid.major=
+                     ggplot2::element_line(color="#CCCCCC",
+                                           linetype="dashed"),
+                     panel.grid.minor=ggplot2::element_line(color="#DDDDDD",
+                                                            linetype="dashed"))
+  print(p)
+}
+
+#' Function to plot the training, forecast and actual values
+#'
+#' @param object: clairvoyant forecast object with steps in process
+#' @param freq: string giving 'weekly' or 'daily' for the plot
+#' @param short.term: boolean indicating if should be truncated to short term
+#' @param n.history: number of training dates to include in short.term plot
+#' @param n.forecast: number of forecast dates to include in short.term plot
+#' @param freq: frequency of error (weekly aggregate or daily)
+#' @param outl.dir: output directory
+#' @return: none (plot producted)
+#' @export
+PlotTrainingActualAndForecast <- function(object,
+                                          freq='weekly', short.term=F,
+                                          n.history=28, n.forecast=14) {
+  training <- object$training[[freq]]$raw
+  forecast <- object$forecast[[freq]]$final
+  evaluation <- object$evaluation[[freq]]
+  colnames(forecast) <- c('date', 'value', 'value.lower', 'value.upper')
+  if (is.null(training$actual.lower)) {
+    training$actual.lower <- NA
+  }
+  if (is.null(training$actual.upper)) {
+    training$actual.upper <- NA
+  }
+  if (short.term) {
+    training <- tail(training, n.history)
+    forecast <- head(forecast, n.forecast)
+    if (!is.null(evaluation)) {
+      evaluation <- head(evaluation, n.forecast)
+    }
+  }
+  colnames(training) <- c('date', 'value', 'value.lower', 'value.upper')
+  training$type <- "training"
+  color.idx <- c(3, 1)
+  if (!is.null(evaluation)) {
+    evaluation$type <- "actuals"
+    color.idx <- c(2, 1, 3)
+  }
+  forecast$type <- "forecast"
+  all <- rbind(training, forecast)
+  all$type <- factor(all$type, levels=c("training", "forecast"))
+
+  if (!short.term) {
+    # decide x-axis start year, end year and line width
+    min.year <- as.numeric(substr(min(all$date), 1, 4))
+    min.year <- min.year + (min(all$date) >=
+                              as.Date(paste(min.year, "-07-01", sep="")))
+    min.year <- as.Date(paste(min.year, "-01-01", sep=""))
+    max.year <- as.numeric(substr(max(all$date), 1, 4))
+    max.year <- max.year + (max(all$date) >=
+                              as.Date(paste(max.year, "-07-01", sep="")))
+    max.year <- as.Date(paste(max.year, "-01-01", sep=""))
+    datebreaks <- seq(min.year, max.year, by="year")
+  } else {
+    datebreaks <- seq(min(training$date), max(forecast$date), by=7)
+  }
+  line.width <- 0.5 + (freq == "weekly") * 0.5
+
+  freq.tmp <- freq
+  substr(freq.tmp, 1, 1) <- toupper(substr(freq.tmp, 1, 1))
+  title.name <- paste(freq.tmp, "Training and Forecast")
+
+  p <- ggplot2::ggplot(data=all, ggplot2::aes(x=date, y=value, color=type))
+  p <- p + ggplot2::geom_ribbon(data=forecast, ggplot2::aes(x=date,
+                                                            y=NULL,
+                                                            ymax=value.upper,
+                                                            ymin=value.lower,
+                                                            color=NA),
+                                fill="red", alpha=0.15, color='transparent')
+  p <- p + ggplot2::geom_line(size=line.width)
+  if (!is.null(evaluation)) {
+    p <- p + ggplot2::geom_line(data=evaluation, ggplot2::aes(
+      x=date, y=actual),
+      size=line.width, alpha=0.5)
+  }
+  p <- p +
+    ggplot2::scale_color_manual(values=scales::hue_pal()(3)[color.idx],
+                                name="") +
+    ggplot2::scale_x_date(breaks=datebreaks,
+                          labels=scales::date_format("%Y-%m-%d")) +
+    ggplot2::xlab("") + ggplot2::ylab("") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(axis.text.x=ggplot2::element_text(size=15, face="bold"),
+                   axis.text.y=ggplot2::element_text(size=15, face="bold"),
+                   plot.title=ggplot2::element_text(size=20,
+                                                    vjust=2, face="bold"),
+                   legend.position="bottom",
+                   legend.text=ggplot2::element_text(size=15),
+                   legend.background=
+                     ggplot2::element_rect(fill = "transparent"),
+                   legend.key=ggplot2::element_rect(fill = "transparent"),
+                   legend.key.width=grid::unit(1.5, "cm")) +
+    ggplot2::theme(panel.border=ggplot2::element_blank(),
+                   panel.background=ggplot2::element_blank(),
+                   axis.line=ggplot2::element_line(color="grey"),
+                   panel.grid.major=
+                     ggplot2::element_line(color="#CCCCCC",
+                                           linetype="dashed"),
+                   panel.grid.minor=
+                     ggplot2::element_line(color="#DDDDDD",
+                                           linetype="dashed"))
+  print(p)
+
+}
+
+#' Function to plot error for two different forecast specifications
+#'
+#' @param object1: first clairvoyant forecast object to compare
+#' @param object2: second clairvoyant forecast object to compare
+#' @param label1: label for the first forecast specification
+#' @param label2: label for the 2nd forecast specification
+#' @param freq: the frequency of the error to plot (daily or weekly)
+#' @param short.term: whether to truncate to the first n.error measurements
+#' @param n.error: number of measurements to plot if truncating
+#' @param log.scale: boolean of whether to plot the error on the log scale
+#' @param dates.annotations: dataframe of events to annotate the plot
+#' @return: null, plot is produced
+#' @export
+PlotErrorComparison <- function(object1, object2=NULL, label1='', label2='',
+                                freq='daily', short.term=T, n.error=14,
+                                log.scale=T, dates.annotations=NULL) {
+  error1 <- object1$evaluation[[freq]]
+  error1$type <- label1
+  if (!is.null(object2)) {
+    error2 <- object2$evaluation[[freq]]
+    error2$type <- label2
+  } else error2 <- NULL
+
+  if (short.term) {
+    error1 <- head(error1, n.error)
+    error2 <- head(error2, n.error)
+  }
+  if (!is.null(dates.annotations)) {
+    if (class(dates.annotations) == 'character' &&
+        dates.annotations == 'DOW') {
+      dates.annotations <- data.frame(date=error1$date,
+                                      event=format(as.Date(error1$date), '%a'))
+    }
+    dates.annotations <-
+        subset(dates.annotations, date %in% c(error1$date, error2$date))
+    dates.annotations <- dates.annotations[order(dates.annotations$date), ]
+    dates.annotations$error <-
+        subset(error1, date %in% dates.annotations$date)$error
+
+  }
+
+  error.all <- rbind(error1, error2)
+  if (!is.null(error2)) {
+    error.all$type <- factor(error.all$type, levels=c(label1, label2))
+  } else error.all$type <- factor(error.all$type, levels=c(label1))
+
+  freq.tmp <- freq
+  substr(freq.tmp, 1, 1) <- toupper(substr(freq.tmp, 1, 1))
+  title.name <-
+      paste(freq.tmp, "Relative Forecast Error:",
+           "(forecast - truth) / truth \n")
+   if (label1 != '' || label2 != '') {
+     title.name <- paste(title.name, label1, 'vs', label2)
+  }
+  p <- ggplot2::ggplot(data = error.all,
+                       ggplot2::aes(x=date, y=error, color=type)) +
+    ggplot2::geom_hline(yintercept = 0, color = "grey", size = 1) +
+    ggplot2::geom_line(size = 1) +
+    ggplot2::scale_x_date(labels = scales::date_format("%Y-%m-%d")) +
+    ggplot2::xlab("") + ggplot2::ylab("") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 15, face = "bold"),
+      axis.text.y = ggplot2::element_text(size = 15, face = "bold"),
+      plot.title = ggplot2::element_text(size = 20, vjust = 2, face = "bold"),
+      legend.position = 'bottom',
+      legend.text = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_blank(),
+      legend.background = ggplot2::element_rect(fill = "transparent"),
+      legend.key = ggplot2::element_rect(fill = "transparent"),
+      legend.key.width = grid::unit(1.5, "cm")
+    ) +
+    ggplot2::theme(
+      panel.border = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "grey"),
+      panel.grid.major = ggplot2::element_line(color = "#CCCCCC",
+                                               linetype = "dashed"),
+      panel.grid.minor = ggplot2::element_line(color = "#DDDDDD",
+                                               linetype = "dashed")
+    )
+  if (label1 == '' && label2 == '') {
+    p <- p + ggplot2::theme(legend.position = 'none')
+  }
+  if (!is.null(dates.annotations)) {
+    p <- p +
+        ggplot2::geom_text(data=dates.annotations, size=6,
+                           vjust=-1 ^ c(1:nrow(dates.annotations)) * 0.5,
+                           ggplot2::aes(x=date, y=error,
+                                        label=event, color=label1))
+  }
+  if (log.scale) {
+    custom_log_y_trans <- function() {
+    scales::trans_new(
+        "custom_log_y",
+         transform = function (x) (sign(x) * log(abs(x) + 1, 10)),
+         inverse = function (y) (sign(y) * (10 ^ (abs(y)) - 1)),
+         domain = c(-Inf, Inf))
+    }
+    errs.na <- error.all$error[!is.na(error.all$error)]
+    if (min(errs.na) < 0) {
+      y.min.less0 <- min(c(-1e-1, min(errs.na[errs.na < 0])))
+      y.max.less0 <- min(c(-1e-1, max(errs.na[errs.na < 0])))
+      y.breaks.less0 <-
+          c(round(log(-y.min.less0, 10)):round(log(-y.max.less0, 10)))
+      y.breaks.less0 <- - 10 ^ (y.breaks.less0)
+    } else y.breaks.less0 <- NULL
+    if (max(errs.na) > 0) {
+      y.min.greater0 <- max(c(1e-1, min(error.all$error[error.all$error > 0])))
+      y.max.greater0 <- max(c(1e-1, max(error.all$error[error.all$error > 0])))
+      y.breaks.great0 <-
+          c(round(log(y.min.greater0, 10)):round(log(y.max.greater0, 10)))
+      y.breaks.great0 <- 10 ^ (y.breaks.great0)
+    } else y.breaks.great0 <- NULL
+    y.breaks <- c(y.breaks.less0, y.breaks.great0)
+
+    p <- p + ggplot2::scale_y_continuous(
+        trans=custom_log_y_trans(),
+         limits=c(min(error.all$error, 0),
+         max(error.all$error, 0)), breaks=y.breaks)
+  } else {
+    p <- p + ylim(min(error.all$error, 0), max(error.all$error, 0))
+  }
+  print(p)
+
+}
+
+#' Function to plot the demand, volume and precision by date
+#'
+#' @param df: dataframe containing key metrics for some period of time
+#' @param dt.format: string giving the format for the date
+#' @return: NULL (plot produced)
+#' @export
+PlotPrecisionAndVolumeByAge <- function(df, dt.format="%a") {
+
+  df.volume <- df[c('date', 'volume.fresh', 'volume.1day', 'volume.2day',
+                    'volume.freeze')]
+  df.volume$volume.freeze <- df.volume$volume.freeze * -1
+
+  df.volume <-
+      reshape::melt(data=df.volume, id.vars="date",
+                    measure.vars=c('volume.fresh', 'volume.1day',
+                                   'volume.2day', 'volume.freeze'))
+
+  colnames(df.volume) <- c('date', 'age', 'volume')
+
+  df.volume$age <- gsub('volume.', '', df.volume$age)
+  df.volume$age <- gsub('day' , ' day', df.volume$age)
+  df.volume$age <-
+     factor(df.volume$age, levels=c('fresh', '1 day', '2 day', 'freeze'))
+  df.volume.freeze <- subset(df.volume, age == 'freeze')
+
+  df.volume <- subset(df.volume, age != 'freeze')
+
+  df.precision <- df[c('date', 'precision.daily', 'demand')]
+  df.precision$precision.req <- df.precision$demand * 0.9
+  tail.df.precision <- tail(df.precision, 1)
+  tail.df.precision$date <- tail.df.precision$date + 1
+  df.precision <- rbind(df.precision, tail.df.precision)
+
+  df.annotations <- df.precision[1,]
+  df.annotations$demand <- df.annotations$demand + 100
+  df.annotations$precision.req <- df.annotations$precision.req - 100
+  df.annotations$demand.text <- 'Demand'
+  df.annotations$precision.text <- '90% precision'
+
+  title.name <- 'Demand and volume delivered by age and day of week'
+
+  p <- ggplot2::ggplot(data=df.volume, ggplot2::aes(
+           x=date, y=volume, fill=age)) +
+      ggplot2::geom_bar(stat='identity') +
+      ggplot2::geom_bar(data=df.volume.freeze, stat='identity')
+  p <- p +
+      ggplot2::geom_step(data=df.precision, ggplot2::aes(
+           x=date - 0.5, y=demand, fill=NA), color='orange', size=1.5) +
+      ggplot2::geom_step(data=df.precision, ggplot2::aes(
+          x=date - 0.5, y=precision.req, fill=NA), color='orange',
+          linetype='dashed', size=1.5) +
+      ggplot2::geom_text(data=df.annotations, ggplot2::aes(
+          x=date, y=demand, label=demand.text, fill=NA),
+               color='orange', size=6) +
+      ggplot2::geom_text(
+          data=df.annotations, size=6, color='orange',
+          ggplot2::aes(x=date, y=precision.req,
+                       label=precision.text, fill=NA))
+  p <- p  +
+    ggplot2::scale_x_date(labels = scales::date_format(dt.format)) +
+    ggplot2::xlab("") +
+    ggplot2::ylab("Volume Delivered") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 15, face = "bold"),
+      axis.text.y = ggplot2::element_text(size = 15, face = "bold"),
+      plot.title = ggplot2::element_text(size = 20,
+                                         vjust = 2, face = "bold"),
+      legend.position = 'bottom',
+      legend.text = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_blank(),
+      legend.background = ggplot2::element_rect(fill = "transparent"),
+      legend.key = ggplot2::element_rect(fill = "transparent"),
+      legend.key.width = grid::unit(1.5, "cm")
+    ) +
+    ggplot2::theme(
+      panel.border = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "grey"),
+      panel.grid.major = ggplot2::element_line(color = "#CCCCCC",
+                                               linetype = "dashed"),
+      panel.grid.minor = ggplot2::element_line(color = "#DDDDDD",
+                                               linetype = "dashed")
+    )
+  print(p)
+}
+
+#' Function to plot the total revenue, profit, product costs and opportunity
+#' costs by date
+#'
+#' @param df: dataframe containing key metrics for some period of time
+#' @param unit.cost: the cost per unit product
+#' @param dt.format: string giving the format for the date
+#' @return: NULL (plot produced)
+#' @export
+PlotRevenueProfitCost <- function(df, unit.cost=0.8, dt.format) {
+
+  df$product.cost <- -1 * df$influx * unit.cost
+  df$opportunity.cost <- (1 - df$precision.daily) * df$price.fresh * df$demand
+  df.tail <- tail(df, 1)
+  df.tail$date <- df.tail$date + 1
+
+  title.name <- 'Revenue, profit and costs'
+
+  p <- ggplot2::ggplot(data=df, ggplot2::aes(x=date - 0.5, y=total.profit,
+                                             color='Total profit')) +
+    ggplot2::geom_rect(ggplot2::aes(
+                           xmin=date - 0.5, xmax=dplyr::lead(date) - 0.5,
+                           ymin=product.cost, ymax=total.profit,
+                           fill='Total revenue'), alpha=0.5, color=NA) +
+    ggplot2::geom_rect(
+        ggplot2::aes(xmin=date - 0.5, xmax=dplyr::lead(date) - 0.5,
+                     ymin=total.profit, ymax=total.profit + opportunity.cost,
+                     fill='Opportunity cost'), alpha=0.5, color=NA) +
+    ggplot2::geom_step(
+        ggplot2::aes(y=product.cost, color='Product costs'), size=1.5) +
+    ggplot2::geom_step(size=1.5) +
+    ggplot2::geom_hline(yintercept = 0, color = "grey", size = 1)
+  p <- p + ggplot2::scale_color_manual('', values=c('Total profit'='green',
+                                                    'Product costs'='red')) +
+    ggplot2::scale_fill_manual('', values=c('Total revenue'='purple',
+                                            'Opportunity cost'='orange'))
+  p <- p  +
+    ggplot2::scale_x_date(labels = scales::date_format(dt.format)) +
+    ggplot2::xlab("") +
+    ggplot2::ylab("") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 15, face = "bold"),
+      axis.text.y = ggplot2::element_text(size = 15, face = "bold"),
+      plot.title = ggplot2::element_text(size = 20, vjust = 2, face = "bold"),
+      legend.position = 'bottom',
+      legend.text = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_blank(),
+      legend.background = ggplot2::element_rect(fill = "transparent"),
+      legend.key = ggplot2::element_rect(fill = "transparent"),
+      legend.key.width = grid::unit(1.5, "cm")
+    ) +
+    ggplot2::theme(
+      panel.border = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "grey"),
+      panel.grid.major =
+          ggplot2::element_line(color = "#CCCCCC", linetype = "dashed"),
+      panel.grid.minor =
+          ggplot2::element_line(color = "#DDDDDD", linetype = "dashed")
+    )
+  print(p)
+}
+
+#' Function to plot the total revenue, profit, product costs and opportunity
+#' costs by the forecast prediction quantile used to generate the influx
+#'
+#' @param df1: dataframe containing key metrics for some period of time
+#' @param df2: dataframe containing key metrics (using alternative precision
+#'   penalty method)
+#' @param label1: label for the first dataframe
+#' @param label2: label fo rthe second dataframe
+#' @param unit.cost: the cost per unit product
+#' @param metrics: vector of strings giving the metrics to plot. Options are:
+#'   total.profit, precision.ytd, number.of.precision.misses, freezing.loss,
+#'   precision.penalty.cost, opportunity.cost, precision.penalty
+#' @param metrics.name: string giving a name  for plot title for metrics
+#' @param metrics.scale: object from scales to have for the metric, options are
+#'   scales::dollar, scales::percent, scales::number among others
+#' @return: NULL (plot produced)
+#' @export
+PlotMetricsbyForecastQuantile <- function(df1, df2=NULL, label1='', label2='',
+                                          unit.cost=0.8,
+                                          metrics=c('total.profit'),
+                                          metrics.name='',
+                                          metrics.scale=scales::dollar) {
+
+  df1$unit.cost <- unit.cost
+  df1 <- plyr::ddply(df1, plyr::.(conf.level), plyr::summarise,
+                     total.profit=sum(total.profit, na.rm=T),
+                     precision.ytd=tail(precision.ytd, 1),
+                     number.of.precision.misses=
+                     max(num.precision.misses, na.rm=T),
+                     freezing.loss=sum(volume.freeze *
+                                      (unit.cost - price.freeze),
+                                      na.rm=T),
+                     opportunity.cost=sum((1 - precision.daily) *
+                                            demand * (price.fresh - unit.cost),
+                                          na.rm=T),
+                     precision.penalty=max(precision.penalty),
+                     precision.penalty.loss=sum(precision.penalty *
+                                                total.revenue, na.rm=T))
+  df1$type <- label1
+
+  if (!is.null(df2)) {
+    df2$unit.cost <- unit.cost
+    df2 <- plyr::ddply(df2, plyr::.(conf.level), plyr::summarise,
+                        total.profit=sum(total.profit, na.rm=T),
+                        precision.ytd=tail(precision.ytd, 1),
+                        number.of.precision.misses=
+                        max(num.precision.misses, na.rm=T),
+                        freezing.loss=sum(volume.freeze *
+                                          (unit.cost - price.freeze),
+                                          na.rm=T),
+                        opportunity.cost=sum((1 - precision.daily) * demand
+                                             * (price.fresh - unit.cost),
+                                             na.rm=T),
+                        precision.penalty=max(precision.penalty),
+                        precision.penalty.loss=sum(precision.penalty *
+                                                   total.revenue, na.rm=T))
+    df2$type <- label2
+
+  }
+  df <- rbind(df1, df2)
+  df$type <- factor(df$type)
+  metric.str <- gsub('[.]', ' ', metrics)
+  metric.str <- gsub('ytd', 'YTD', metric.str)
+  substr(metric.str, 1, 1) <- toupper(substr(metric.str, 1, 1))
+  if (length(metrics) == 1) {
+    title.name <- paste(metric.str, 'by forecast prediction quantile')
+  } else {
+    title.name <- paste(metrics.name, 'by forecast prediction quantile')
+  }
+  if (!is.null(df2) && label1 != '' && label2 != '') {
+    title.name <- paste(title.name, '\n for', label1, '&', label2)
+  }
+  for (i in 1:length(metrics)) {
+    df[[paste0('metric', i)]] <- df[[metrics[i]]]
+  }
+  if (!is.null(df2)) {
+    p <- ggplot2::ggplot(data=df, ggplot2::aes(x=conf.level, y=metric1,
+                                               color=metric.str[1],
+                                               linetype=type))
+  } else {
+    p <- ggplot2::ggplot(data=df, ggplot2::aes(x=conf.level, y=metric1,
+                                               color=metric.str[1]))
+  }
+  p <- p + ggplot2::geom_line(size = 1.5)
+  if (length(metrics) > 1) {
+    p <- p + ggplot2::geom_line(size = 1.5, ggplot2::aes(y=metric2,
+                                                         color=metric.str[2]))
+  }
+  if (length(metrics) > 2) {
+    p <- p + ggplot2::geom_line(size = 1.5, ggplot2::aes(y=metric3,
+                                                         color=metric.str[3]))
+  }
+  p <- p  +
+    ggplot2::scale_x_continuous(labels = scales::percent) +
+    ggplot2::scale_y_continuous(labels = metrics.scale) +
+    ggplot2::xlab("Forecast prediction quantile") +
+    ggplot2::ylab(ifelse(length(metrics) > 1, '', metric.str)) +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 15, face = "bold"),
+      axis.text.y = ggplot2::element_text(size = 15, face = "bold"),
+      plot.title = ggplot2::element_text(size = 20, vjust = 2, face = "bold"),
+      legend.position = ifelse(label2 != '' || length(metrics) > 1,
+                               'bottom', 'none'),
+      legend.text = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_blank(),
+      legend.background = ggplot2::element_rect(fill = "transparent"),
+      legend.key = ggplot2::element_rect(fill = "transparent"),
+      legend.key.width = grid::unit(1.5, "cm")
+    ) +
+    ggplot2::theme(
+      panel.border = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "grey"),
+      panel.grid.major =
+        ggplot2::element_line(color = "#CCCCCC", linetype = "dashed"),
+      panel.grid.minor =
+        ggplot2::element_line(color = "#DDDDDD", linetype = "dashed")
+    )
+  print(p)
+}
+
+
+

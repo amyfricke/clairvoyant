@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1580108885284.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "1386603525",
+    "id" : "32D1460D",
+    "lastKnownWriteTime" : 1580194536,
+    "last_content_update" : 1580194536396,
+    "path" : "~/CrispTakeHome_AmyRichardson/clairvoyant/R/evaluate_forecast.R",
+    "project_path" : "R/evaluate_forecast.R",
+    "properties" : {
+        "cursorPosition" : "550,22",
+        "scrollLine" : "543"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 3,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

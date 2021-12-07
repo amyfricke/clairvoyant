@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1636785759524.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "3D3EEBCF",
+    "lastKnownWriteTime" : 1635121214,
+    "last_content_update" : 1635121214,
+    "path" : "~/R/MyPackages/clairvoyant/R/evaluate_forecast.R",
+    "project_path" : "R/evaluate_forecast.R",
+    "properties" : {
+        "cursorPosition" : "28,51",
+        "scrollLine" : "6"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 11,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

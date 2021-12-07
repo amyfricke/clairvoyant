@@ -1,0 +1,389 @@
+
+#' Function to get backtesting values for influx (ordered from growers) and
+#'  demand (orders from grocer)
+#'
+#' @param history: dataframe containing fields for date and actual used to
+#'   back test ordering behavior using ClairvoyantRolling() forecast
+#' @param start.date: date to start backtesting
+#' @param end.date: date to end backtesting
+#' @param missing.fill: value to fill in missing dates with (default missing)
+#' @param event.parameters: list of parameters for event handling
+#' @param pred.level: level for the prediction intervals
+#' @param period: length of seasonal period (in weeks)
+#' @param transform: transformation to apply before forecasting weekly
+#' @param models: models to be used in forecasting weekly
+#' @param consensus.method: function to be used to combine forecasts
+#' @param disaggregation.parameters: list of parameters for daily disaggregation
+#'   found using the DisaggregationParameters() function
+#' @return: list of data frames containing back tested influx (orders) and
+#'   actual demand using the forecast, the upper and lower prediction limitsj
+#' @export
+BackTestOrdering <- function(history, start.date, end.date,
+                             missing.fill=NA, days.out.order=7,
+                             event.parameters=NULL,
+                             pred.level=0.8,
+                             period=52,
+                             transform='Box_Cox',
+                             models=c('AutoArima', 'Arima021',
+                                      'Arima012', 'HWinters'),
+                             consensus.method='median',
+                             disaggregation.parameters=NULL) {
+  history$date <- as.Date(history$date)
+  history <- history[order(history$date), ]
+  history <- FillMissingDates(history, missing.fill)
+  stopifnot(as.Date(end.date) %in% history$date &&
+            as.Date(start.date) %in% history$date)
+  # Simulate a sequence of streaming data that would be available when ordering
+  # 1 week aheahd (or days.out.order ahead) and pass it to RollingClairvoyant
+  streaming.date.seq <- seq(as.Date(start.date), as.Date(end.date), by=1)
+  streaming.demand <- history$actual[history$date %in% streaming.date.seq]
+  streaming.history.seq <- streaming.date.seq - days.out.order
+
+  training.history.list <-
+      lapply(streaming.history.seq,
+              FUN=function(dt) return(subset(history, date <= dt)))
+
+  influx.ob <-
+      parallel::mclapply(training.history.list, RollingClairvoyant,
+                         missing.fill=missing.fill,
+                         event.parameters=event.parameters,
+                         pred.level=pred.level,
+                         period=period, transform=transform,
+                         models=models, consensus.method=consensus.method,
+                         disaggregation.parameters=disaggregation.parameters,
+                         days.out.forecast=days.out.order)
+
+  influx <-
+      do.call(rbind, lapply(influx.ob, FUN=function(x) return(x$forecast)))
+  influx.lower <-
+      do.call(rbind, lapply(influx.ob,
+                            FUN=function(x) return(x$forecast.lower)))
+  influx.upper <-
+      do.call(rbind, lapply(influx.ob,
+                            FUN=function(x) return(x$forecast.upper)))
+
+   influx.demand <- data.frame(date=streaming.date.seq, demand=streaming.demand,
+                        influx=as.vector(influx))
+   influx.demand.lower <-
+       data.frame(date=streaming.date.seq, demand=streaming.demand,
+                  influx=as.vector(influx.lower))
+   influx.demand.upper <-
+       data.frame(date=streaming.date.seq, demand=streaming.demand,
+                  influx=as.vector(influx.upper))
+
+  return(list(mean=influx.demand, lower=influx.demand.lower,
+              upper=influx.demand.upper))
+
+}
+
+
+#' Function to compute metrics such as volume of fresh product sent to customer
+#'  as well as the age, the revenue (adjusted for precision penalties) and the
+#'  precision
+#'
+#' @param influx.demand: dataframe containing the influx and actual demand
+#' @param starting.1day: amount of product that is one day old before the first
+#'  day of computation of metrics
+#' @param starting.2day: amount of product that is 2 days old before first day
+#' @param starting.3day: amount of product that is 3 days old before first day
+#' @param price.fresh: price of fresh product (without precision penalty)
+#' @param price.1day: price of 1 day old product (without precision penalty)
+#' @param price.2day: price of 2 day old product (without precision penalty)
+#' @param price.freeze: price of frozen product (sold at a loss, > 3 days old)
+#' @param unit.expense: cost of each product unit
+#' @param demand.ytd: demand year to date (or from some date of interest)
+#' @param delivered.ytd: amount delivered year to date (or date of interest)
+#' @param precision.req: delivery precision requirement
+#' @param weekly.precision.start: the rolling weekly precision at the start
+#' @param precision.type: the range of the precison to use in determining if
+#'   the requirement has been met, options are 'ytd', 'daily' and 'weekly'
+#' @param precision.miss.penalty.type: string giving the method of applying
+#'   price penalties for missing the precision requirement.
+#'   Options are: frequency: which means a constant (and permanent) discount is
+#'   applied each time the precision requirement is missed. Other option is
+#'   volume which means each (permanent) penalty is proportional to the short-
+#'   fall volume (here directly equal to it - e.g. if 87% is hit, 13% discount
+#' @param prior.precision.misses: vector of the shortfall volume percentages for
+#'  prior precision misses (ytd or since date of interest)
+#' @param price.concession.constant: the size of the constant penalty applied
+#'  as a percentage for the frequency precision miss penalty type.
+#' @param good.grace.freq: for the frequency penalty type, the number of "good
+#'  grace" precision misses allowed before a penalty is applied
+#' @param good.grace.volume for the volume penalty type, the amount of "good
+#'  grace" shortfall precision allowed before permanent penalty is applied
+#' @return dataframe containing key metrics such as volume, age of fresh
+#'  product delivered, price information, precision, penalty applied, revenue
+#'  and profit
+#' @export
+ComputeVolumeAgeRevenue <- function(influx.demand,
+                                    starting.1day=0, starting.2day=0,
+                                    starting.3day=0,
+                                    price.fresh=2.75, price.1day=2.35,
+                                    price.2day=1.95,
+                                    price.freeze=0.50,
+                                    unit.expense=0.80,
+                                    demand.ytd=0,
+                                    delivered.ytd=0,
+                                    precision.req=0.9,
+                                    precision.type='ytd',
+                                    weekly.precision.start=0.9,
+                                    precision.miss.penalty.type='frequency',
+                                    prior.precision.misses=c(),
+                                    price.concession.constant=0.10,
+                                    good.grace.freq=2,
+                                    good.grace.volume=0.02) {
+
+  current.1day <- starting.1day
+  current.2day <- starting.2day
+  current.3day <- starting.3day
+  precision.misses <- prior.precision.misses
+
+  df <- influx.demand
+
+  df$volume.fresh <- NA
+  df$price.fresh <- price.fresh
+  df$volume.1day <- NA
+  df$price.1day <- price.1day
+  df$volume.2day <- NA
+  df$price.2day <- price.2day
+  df$volume.total <- NA
+  df$volume.freeze <- NA
+  df$price.freeze <- price.freeze
+
+  df$total.revenue <- NA
+  df$total.profit <- NA
+  df$precision.daily <- NA
+  df$precision.weekly <- weekly.precision.start
+  df$precision.ytd <- NA
+  df$num.precision.misses <- length(prior.precision.misses)
+  df$precision.penalty <- NA
+
+  for (i in 1:nrow(df)) {
+    # To optimize revenue, prioritize sending the freshest pineapple
+    df$volume.fresh[i] <- min(c(df$demand[i], df$influx[i]))
+    diff.fresh <- max(c(0, (df$demand[i] - df$volume.fresh[i])))
+
+    # If there is still demand after sending as much of the fresh, use any 1 day
+    #  old product
+    df$volume.1day[i] <- min(c(diff.fresh, current.1day))
+    diff.1day <- max(c(0, (diff.fresh - df$volume.1day[i])))
+
+    # If there is still demand, then use any 2 day old product
+    df$volume.2day[i] <- min(c(diff.1day, current.2day))
+
+    # Send all 3 day product to be frozen
+    df$volume.freeze[i] <- current.3day
+
+    df$volume.total[i] <-
+        (df$volume.fresh[i] + df$volume.1day[i] + df$volume.2day[i])
+
+    # Get daily, weekly and year to date (ytd) precision metrics
+    df$precision.daily[i] <- df$volume.total[i] / df$demand[i]
+    if (i >= 7) {
+      df$precison.weekly[i] <-
+           sum(df$volume.total[(i - 7):i]) / sum(df$demand[(i - 7):i])
+    } else {
+      df$precision.weekly[i] <-
+        sum(df$volume.total[1:i]) / sum(df$demand[1:i]) * i / 7 +
+          weekly.precision.start * (7 - i) / 7
+    }
+    delivered.ytd <- delivered.ytd + df$volume.total[i]
+    demand.ytd <- demand.ytd + df$demand[i]
+    df$precision.ytd[i] <- delivered.ytd / demand.ytd
+
+    # Compute any penalties for breaking precision requirements (if merited)
+    if (precision.miss.penalty.type == 'frequency') {
+      # For the first penalty type, apply a constant, permanent price penalty
+      #  for each product for each instance of breaking the precision after the
+      #  good grace instances have passed
+      if (df[[paste0('precision.', precision.type)]][i] < precision.req) {
+        precision.misses <- c(precision.misses, df$precision.ytd[i])
+      }
+      num.misses <- length(precision.misses)
+      precision.penalty <-
+          (1 - price.concession.constant) ^
+             ((num.misses - good.grace.freq) *
+              as.numeric(num.misses > good.grace.freq))
+    } else if (precision.miss.penalty.type == 'volume') {
+      # For the second type, the permanent price penalty is equal to the
+      # shortfall precision (if the shortfall is beyond the "good grace"
+      if (df[[paste0('precision.', precision.type)]][i] <
+          (precision.req - good.grace.volume)) {
+        precision.misses <- c(precision.misses, df$precision.ytd[i])
+      }
+      precision.penalty <- prod(precision.misses)
+      num.misses <- length(precision.misses)
+    }
+    num.misses <- length(precision.misses)
+
+    # Use the price penalty to compute the new price (precision.penalty=1 if no
+    # penalty has been applied yet)
+    df$price.fresh[i] <- df$price.fresh[i] * precision.penalty
+    df$price.1day[i] <- df$price.1day[i] * precision.penalty
+    df$price.2day[i] <- df$price.2day[i] * precision.penalty
+
+    # Compute revenue and profit
+    df$total.revenue[i] <- df$price.fresh[i] * df$volume.fresh[i] +
+        df$price.1day[i] * df$volume.1day[i] +
+            df$price.2day[i] * df$volume.2day[i] +
+                df$price.freeze[i] * df$price.freeze[i]
+    df$total.profit[i] <- df$total.revenue[i] - df$influx[i] * unit.expense
+
+    # Some other metrics detailing the performance (number of times precision
+    #  requirement has not been met and the price concession
+    df$precision.penalty[i] <- 1 - precision.penalty
+    df$num.precision.misses[i] <- num.misses
+
+    # Reset the values of the 3 day, 2 day and 1 day old pineapple for the next
+    # day
+    current.3day <- max(c(0, current.2day - df$volume.2day[i]))
+    current.2day <- max(c(0, current.1day - df$volume.1day[i]))
+    current.1day <- max(c(0, df$influx[i] - df$volume.fresh[i]))
+  }
+
+  return(df)
+}
+
+#' Function to get the precision, volume, age, revenue and profit for various
+#'  forecasting confidence levels (here called prediction quantiles) on
+#'  obtained back tested influx/demand
+#'
+#' @param pred.levels: vector of levels to obtain metrics for
+#' @param history: dataframe containing fields for date and actual used to
+#'   back test ordering behavior using ClairvoyantRolling() forecast
+#' @param start.date: date to start backtesting
+#' @param end.date: date to end backtesting
+#' @param missing.fill: value to fill in missing dates with (default missing)
+#' @param days.out.order: number of days out to order product
+#' @param event.parameters: list of parameters for event handling
+#' @param period: length of seasonal period (in weeks)
+#' @param transform: transformation to apply before forecasting weekly
+#' @param models: models to be used in forecasting weekly
+#' @param consensus.method: function to be used to combine forecasts
+#' @param disaggregation.parameters: list of parameters for daily disaggregation
+#'   found using the DisaggregationParameters() function
+#' @param starting.1day: amount of product that is one day old before the first
+#'  day of computation of metrics
+#' @param starting.2day: amount of product that is 2 days old before first day
+#' @param starting.3day: amount of product that is 3 days old before first day
+#' @param price.fresh: price of fresh product (without precision penalty)
+#' @param price.1day: price of 1 day old product (without precision penalty)
+#' @param price.2day: price of 2 day old product (without precision penalty)
+#' @param price.freeze: price of frozen product (sold at a loss, > 3 days old)
+#' @param unit.expense: cost of each product unit
+#' @param demand.ytd: demand year to date (or from some date of interest)
+#' @param delivered.ytd: amount delivered year to date (or date of interest)
+#' @param precision.req: delivery precision requirement
+#' @param precision.type: the range of the precison to use in determining if
+#'   the requirement has been met, options are 'ytd', 'daily' and 'weekly'
+#' @param precision.miss.penalty.types: strings giving the method of applying
+#'   price penalties for missing the precision requirement.
+#'   Options are: frequency: which means a constant (and permanent) discount is
+#'   applied each time the precision requirement is missed. Other option is
+#'   volume which means each (permanent) penalty is proportional to the short-
+#'   fall volume (here directly equal to it - e.g. if 87% is hit, 13% discount
+#' @param prior.precision.misses: vector of the shortfall volume percentages for
+#'  prior precision misses (ytd or since date of interest)
+#' @param price.concession.constant: the size of the constant penalty applied
+#'  as a percentage for the frequency precision miss penalty type.
+#' @param good.grace.freq: for the frequency penalty type, the number of "good
+#'  grace" precision misses allowed before a penalty is applied
+#' @param good.grace.volume for the volume penalty type, the amount of "good
+#'  grace" shortfall precision allowed before permanent penalty is applied
+#' @return list of dataframes containing key metrics such as volume, age of
+#'  product delivered, price information, precision, penalty applied, revenue
+#'  and profit for various prediction quantiles
+#'  @export
+BackTestOrderingAndComputeMetrics <- function(pred.levels=seq(0.2, 0.8, by=0.2),
+                                              history, start.date, end.date,
+                                              missing.fill=NA,
+                                              days.out.order=7,
+                                              event.parameters=NULL, period=52,
+                                              transform='Box_Cox',
+                                              models=c('AutoArima', 'Arima021',
+                                                       'Arima012', 'HWinters'),
+                                              consensus.method='median',
+                                              disaggregation.parameters=NULL,
+                                              starting.1day=0, starting.2day=0,
+                                              starting.3day=0,
+                                              price.fresh=2.75, price.1day=2.35,
+                                              price.2day=1.95,
+                                              price.freeze=0.50,
+                                              unit.expense=0.80,
+                                              demand.ytd=0,
+                                              delivered.ytd=0,
+                                              precision.req=0.9,
+                                              precision.types=c('ytd', 'weekly'),
+                                              precision.miss.penalty.type=
+                                              'frequency',
+                                              prior.precision.misses=c(),
+                                              price.concession.constant=0.10,
+                                              good.grace.freqs=c(2, 5),
+                                              good.grace.volume=0.02) {
+  # Backtest what the influx would have been for various forecasting prediction
+  # quantiles
+  results <- list()
+  for (pred.level in pred.levels) {
+    demand.influx <- BackTestOrdering(history, start.date, end.date,
+                                      missing.fill, days.out.order,
+                                      event.parameters, pred.level,
+                                      period, transform, models,
+                                      consensus.method,
+                                      disaggregation.parameters)
+    # Get the conf.levels resulting from the forecast (has equal tailed
+    # prediction interval)
+    demand.influx$mean$conf.level <- 0.5
+    demand.influx$lower$conf.level <- 0.5 - pred.level / 2
+    demand.influx$upper$conf.level <- 0.5 + pred.level / 2
+    for (precision.type in precision.types) {
+      for (good.grace.freq in good.grace.freqs) {
+        if (pred.level == min(pred.levels)) {
+          results[[paste(precision.type, good.grace.freq, sep=':')]] <-
+              ComputeVolumeAgeRevenue(demand.influx$mean,
+                                      starting.1day, starting.2day,
+                                      starting.3day, price.fresh,
+                                      price.1day, price.2day,
+                                      price.freeze, unit.expense,
+                                      demand.ytd, delivered.ytd,
+                                      precision.req, precision.type,
+                                      precision.miss.penalty.type,
+                                      prior.precision.misses,
+                                      price.concession.constant,
+                                      good.grace.freq,
+                                      good.grace.volume)
+        }
+        result.lower <- ComputeVolumeAgeRevenue(demand.influx$lower,
+                                                starting.1day, starting.2day,
+                                                starting.3day, price.fresh,
+                                                price.1day, price.2day,
+                                                price.freeze, unit.expense,
+                                                demand.ytd, delivered.ytd,
+                                                precision.req, precision.type,
+                                                precision.miss.penalty.type,
+                                                prior.precision.misses,
+                                                price.concession.constant,
+                                                good.grace.freq,
+                                                good.grace.volume)
+
+        result.upper <- ComputeVolumeAgeRevenue(demand.influx$upper,
+                                                starting.1day, starting.2day,
+                                                starting.3day, price.fresh,
+                                                price.1day, price.2day,
+                                                price.freeze, unit.expense,
+                                                demand.ytd, delivered.ytd,
+                                                precision.req, precision.type,
+                                                precision.miss.penalty.type,
+                                                prior.precision.misses,
+                                                price.concession.constant,
+                                                good.grace.freq,
+                                                good.grace.volume)
+
+        results[[paste(precision.type, good.grace.freq, sep=':')]] <-
+            rbind(results[[paste(precision.type, good.grace.freq, sep=':')]],
+                  rbind(result.lower, result.upper))
+      }
+    }
+  }
+
+  return(results)
+}

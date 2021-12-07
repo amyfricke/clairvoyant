@@ -1,0 +1,360 @@
+
+#' Function to set a list of Disaggregation parameters
+#'
+#' @param fit.event.terms: whether to fit terms adjusting for whether there
+#'   was an event or affected date in the week (should be handled)
+#' @param fit.season.terms: whether to fit terms estimating seasonal effects to
+#'   the day of week proportions
+#' @param get.pred.int.daily: whether to get a prediction interval for predicted
+#'   day of week proportions (bootstrap intervals obtained)
+#' @param replicates: number of bootstrap replicates for above prediction
+#'   interval
+#' @return: list of parameters for disaggregation to daily
+#' @export
+DisaggregationParameters <- function(fit.event.terms=FALSE,
+                                     fit.season.terms=TRUE,
+                                     get.pred.int=TRUE,
+                                     replicates=600) {
+  disaggregation.parameters <- list()
+
+  stopifnot(fit.event.terms %in% c(TRUE, FALSE))
+  disaggregation.parameters$fit.event.terms <- fit.event.terms
+
+  stopifnot(fit.season.terms %in% c(TRUE, FALSE))
+  disaggregation.parameters$fit.season.terms <- fit.season.terms
+
+  stopifnot(get.pred.int %in% c(TRUE, FALSE))
+  disaggregation.parameters$get.pred.int <- get.pred.int
+
+  stopifnot(round(replicates) - replicates == 0)
+  disaggregation.parameters$replicates <- replicates
+  return(disaggregation.parameters)
+}
+
+#' Function to get the dow multinomial model predictions
+#'
+#' @param y.train: matrix with the historical day of week proportions,
+#' @param x.train: dataframe containing the sine and cosine terms to use in
+#'   day of week multinomial model for each bootstrap replicate (training)
+#' @param x.forecast: dataframe containing the variables used for the multinom
+#'  model for the forecast dates
+#' @param fit.event.terms: whether to fit terms to adjust for changes due to
+#'  presence of events or affected dates (should be taken care of by event
+#'  handling)
+#' @param fit.seasonl.terms: whether to fit seasonality terms for changes in the
+#'   day of week proportions due to seasonality
+#' @return day of week proportions for the forecast dates
+#' @noRd
+.FitMultinomToDailyProp <- function(y.train, x.train, x.forecast,
+                                    fit.event.terms=F, fit.season.terms=F) {
+
+  # Fit multinomial regression to the counts of orders on each day (such that
+  #  it always adds to the same number) using the nnet package
+  model.statement <- 'y.train ~ recent.period'
+  if (fit.event.terms) {
+    model.statement <-
+        paste(model.statement, '+ event.weekday + event.sat + event.sun',
+              'affected.1st + affected.last')
+  }
+  if (fit.season.terms) {
+    model.statement <- paste(model.statement, '+ sin.var + cos.var')
+  }
+  dow.mn <- nnet::multinom(formula(model.statement), x.train, type='probs',
+                           trace=FALSE)
+
+  dow.predict <- predict(dow.mn, x.forecast, type='probs')
+  dow.predict <- as.vector(t(dow.predict))
+  return(dow.predict)
+}
+
+#' Function to get the dow multinomial model predictions on one bootstrap
+#' replicate
+#'
+#' @param idx: indices corresponding to the bootstrap sample
+#' @param y.train: matrix with the historical day of week proportions,
+#' @param x.train: dataframe containing the sine and cosine terms to use in
+#'   day of week multinomial model for each bootstrap replicate (training)
+#' @param x.forecast: dataframe containing the sine and cosine terms for the
+#'  forecast dates
+#' @param fit.event.terms: whether to fit terms to adjust for changes due to
+#'  presence of events or affected dates (should be taken care of by event
+#'  handling)
+#' @param fit.seasonl.terms: whether to fit seasonality terms for changes in the
+#'   day of week proportions due to seasonality
+#' @return day of week proportions for the forecast dates based on bootstrap
+#'   sample
+#' @noRd
+.FitMultinomOnBootRep <- function(idx, y.train, x.train, x.forecast,
+                                  fit.event.terms, fit.season.terms) {
+  y.train <- y.train[idx, ]
+  x.train <- x.train[idx, ]
+
+  return(.FitMultinomToDailyProp(y.train, x.train, x.forecast, fit.event.terms,
+                                 fit.season.terms))
+}
+
+#' Function to retrieve a quantile from a bootstrap sample of estimates
+#'
+#' @param x: boostrap sample of estimates,
+#' @param pred.level: prediction interval level
+#' @param lower: boolean indicating if the lower limit (quantile) is desired
+#' @return: the bootstrap quantile for the desired level and limit
+#' @noRd
+.GetBootQuantile <- function(x, pred.level, lower=T) {
+  if (lower) {
+    prob <- (1 - pred.level) / 2
+  } else {
+    prob <- 1 - ((1 - pred.level) / 2)
+  }
+  return(quantile(x, prob))
+}
+
+#' Function to bootstrap the daily proportion predictions
+#'
+#' @param y.train: matrix with the historical day of week proportions,
+#' @param y.train.lower: matrix with the historical lower limit day of week
+#'  proportions
+#' @param y.train.upper: matrix with the historical upper limit day of week
+#'  proportions
+#' @param x.train: dataframe containing the sine and cosine terms to use in
+#'   day of week multinomial model for each bootstrap replicate (training)
+#' @param x.forecast: dataframe containing the sine and cosine terms for the
+#'  forecast dates
+#' @param fit.event.terms: whether to fit terms to adjust for changes due to
+#'  presence of events or affected dates (should be taken care of by event
+#'  handling)
+#' @param fit.seasonl.terms: whether to fit seasonality terms for changes in the
+#'   day of week proportions due to seasonality
+#' @param replicates: number of bootstrap replicates
+#' @param pred.level: level for the prediction intervals
+#' @return: list containing the forecasted lower prediction
+#'   limit and upper prediction limit for the day of week proportions
+#' @noRd
+.GetBootstrapCIWeeklyProp <- function(y.train, y.train.lower, y.train.upper,
+                                      x.train, x.forecast, fit.event.terms=F,
+                                      fit.season.terms=F, replicates=600,
+                                      pred.level=0.8) {
+  replicates.main <- ceiling(replicates * pred.level)
+  replicates.low <- ceiling(replicates * ((1 - pred.level) / 2))
+  replicates.up <- replicates - replicates.main - replicates.low
+
+  idx.boot <- matrix(sample(c(1:nrow(y.train)),
+                            (nrow(y.train) * replicates.main),
+                            replace=T), ncol=replicates.main)
+  idx.boot.low <- matrix(sample(c(1:nrow(y.train.lower)),
+                                (nrow(y.train.lower) * replicates.low),
+                                replace=T), ncol=replicates.low)
+  idx.boot.up <- matrix(sample(c(1:nrow(y.train.upper)),
+                               (nrow(y.train.upper) * replicates.up),
+                               replace=T), ncol=replicates.up)
+
+  dow.mn.boot <- apply(idx.boot, 2, .FitMultinomOnBootRep,
+                       y.train=y.train, x.train=x.train, x.forecast=x.forecast,
+                       fit.event.terms=fit.event.terms,
+                       fit.season.terms=fit.season.terms)
+  dow.mn.boot.low <- apply(idx.boot.low, 2, .FitMultinomOnBootRep,
+                           y.train=y.train.lower, x.train=x.train,
+                           x.forecast=x.forecast,
+                           fit.event.terms=fit.event.terms,
+                           fit.season.terms=fit.season.terms)
+  dow.mn.boot.up <- apply(idx.boot.up, 2, .FitMultinomOnBootRep,
+                          y.train=y.train.upper, x.train=x.train,
+                          x.forecast=x.forecast,
+                          fit.event.terms=fit.event.terms,
+                          fit.season.terms=fit.season.terms)
+  dow.mn.boot <- cbind(dow.mn.boot, dow.mn.boot.low)
+  dow.mn.boot <- cbind(dow.mn.boot, dow.mn.boot.up)
+
+
+  dow.prop.lower <- apply(dow.mn.boot, 1, .GetBootQuantile,
+                          pred.level=pred.level)
+  dow.prop.upper <- apply(dow.mn.boot, 1, .GetBootQuantile,
+                          pred.level=pred.level, lower=F)
+  return(data.frame(dow.prop.lower=dow.prop.lower,
+                    dow.prop.upper=dow.prop.upper))
+
+}
+
+#' Disaggregate the weekly total forecast to daily sums using multinomial
+#'  regression
+#'
+#' @param daily.history: dataframe containing fields for date, actual,
+#'   actual.lower actual.upper at the daily level
+#' @param weekly.history: dataframe containing the above fields at the weekly
+#'  level
+#' @param weekly.forecast: dataframe containing the weekly forecast (and lower
+#'  and upper prediction limits (date, forecast, forecast.lower and .upper)
+#' @param disaggregation.parameters: list of disaggregation parameters
+#' @param event.parameters: list of event parameters
+#' @param period: length of seasonal period (in weeks)
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit at the daily level
+#' @export
+DisaggregateForecastToDaily <- function(daily.history, weekly.history,
+                                        weekly.forecast,
+                                        disaggregation.parameters=NULL,
+                                        event.parameters=NULL,
+                                        period=52,
+                                        pred.level=0.8) {
+
+  fit.event.terms <- disaggregation.parameters$fit.event.terms
+  fit.season.terms <- disaggregation.parameters$fit.season.terms
+  get.pred.int <- disaggregation.parameters$get.pred.int
+  replicates <- disaggregation.parameters$replicates
+
+  # Get the day of week proportions and forecast this to disaggregate to daily
+  weekly.totals.history <- daily.history
+  weekly.totals.history$actual <- rep(weekly.history$actual, each=7)
+  weekly.totals.history$actual.lower <- rep(weekly.history$actual.lower, each=7)
+  weekly.totals.history$actual.upper <- rep(weekly.history$actual.upper, each=7)
+  weekly.totals.forecast <- rep(weekly.forecast$forecast, each=7)
+
+  # Since the weekly smoothed actuals are stochastic since some are predicted
+  # get the lower and upper totals as well
+  weekly.totals.forecast.lower <- rep(weekly.forecast$forecast.lower, each=7)
+  weekly.totals.forecast.upper <- rep(weekly.forecast$forecast.upper, each=7)
+
+  daily.proportions <- daily.history
+  daily.proportions$proportion <-
+      daily.history$actual / weekly.totals.history$actual
+  daily.proportions$proportion.lower <-
+    daily.history$actual.lower / weekly.totals.history$actual.lower
+  daily.proportions$proportion.upper <-
+    daily.proportions$actual.upper / weekly.totals.history$actual.upper
+
+  forecast.daily.seq <- seq((max(daily.history$date) + 1),
+                            max(weekly.forecast$date), by=1)
+  day.of.week.train <- format(daily.history$date, "%a")
+  day.of.week.forecast <- format(forecast.daily.seq, "%a")
+
+  # Create training data for a multinomial model for day of week
+  # this model enforces the day of week proportions to add to 1
+  y.train <- y.train.upper <- y.train.lower <-
+      data.frame(idx=c(1:nrow(weekly.history)))
+  for (daytmp in day.of.week.forecast[1:7]) {
+    y.train[[paste0('proportion.', tolower(daytmp))]] <-
+      daily.proportions$proportion[day.of.week.train == daytmp]
+    y.train.lower[[paste0('proportion.', tolower(daytmp))]] <-
+      daily.proportions$proportion.lower[day.of.week.train == daytmp]
+    y.train.upper[[paste0('proportion.', tolower(daytmp))]] <-
+      daily.proportions$proportion.upper[day.of.week.train == daytmp]
+  }
+  y.train$idx <- y.train.lower$idx <- y.train.upper$idx <- NULL
+
+  y.train <- round(mean(weekly.history$actual) * as.matrix(y.train))
+  y.train.lower <- (round(mean(weekly.history$actual.lower) *
+                    as.matrix(y.train.lower)))
+  y.train.upper <- (round(mean(weekly.history$actual.upper) *
+                    as.matrix(y.train.upper)))
+
+  if (!is.null(event.parameters$events.schedule)) {
+    event.affected.dates <- GetAffectedList(event.parameters$events.schedule,
+                                             event.parameters$days.before,
+                                             event.parameters$days.after)
+    event.dates <- event.parameters$events.schedule$date
+    event.affected.dates <- setdiff(event.affected.dates, event.dates)
+  } else event.affected.dates <- event.dates <- NULL
+
+  event.wdates <- ifelse(daily.history$date %in% event.dates,
+                         day.of.week.train, 'None')
+  affected.wdates <- ifelse(daily.history$date %in% event.affected.dates,
+                            day.of.week.train, 'None')
+  training.event.wday.matrix <- matrix(event.wdates, ncol=7, byrow=TRUE)
+  training.affected.wday <- matrix(affected.wdates, ncol=7, byrow=TRUE)
+  wday.1st <- day.of.week.train[1]
+  wday.last <- day.of.week.train[7]
+  training.event.weekday <-
+      apply(training.event.wday.matrix, 1, FUN=
+           function(x) return(any(x %in% c('Mon', 'Tue', 'Wed', 'Thu', 'Fri'))))
+  training.event.sat <- apply(training.event.wday.matrix, 1,
+                              FUN=function(x) return(any(x == 'Sat')))
+  training.event.sun <- apply(training.event.wday.matrix, 1,
+                              FUN=function(x) return(any(x == 'Sun')))
+  training.affected.1st <- apply(training.affected.wday, 1,
+                                 FUN=function(x) return(any(x == wday.1st)))
+  training.affected.last <- apply(training.affected.wday, 1,
+                                  FUN=function(x) return(any(x == wday.last)))
+
+  event.wdates <- ifelse(forecast.daily.seq %in% event.dates,
+                         day.of.week.forecast, 'None')
+  affected.wdates <- ifelse(forecast.daily.seq %in% event.affected.dates,
+                            day.of.week.forecast, 'None')
+  forecast.event.wday.matrix <- matrix(event.wdates, ncol=7, byrow=TRUE)
+  forecast.affected.wday <- matrix(affected.wdates, ncol=7, byrow=TRUE)
+  forecast.event.weekday <-
+      apply(forecast.event.wday.matrix, 1, FUN=
+           function(x) return(any(x %in% c('Mon', 'Tue', 'Wed', 'Thu', 'Fri'))))
+  forecast.event.sat <- apply(forecast.event.wday.matrix, 1,
+                              FUN=function(x) return(any(x == 'Sat')))
+  forecast.event.sun <- apply(forecast.event.wday.matrix, 1,
+                              FUN=function(x) return(any(x == 'Sun')))
+  forecast.affected.1st <- apply(forecast.affected.wday, 1,
+                                 FUN=function(x) return(any(x == wday.1st)))
+  forecast.affected.last <- apply(forecast.affected.wday, 1,
+                                  FUN=function(x) return(any(x == wday.last)))
+
+  n.periods.train.fcst <-
+      ceiling((nrow(weekly.history) + nrow(weekly.forecast)) / period)
+  week.idx <- rep(1:period, n.periods.train.fcst)
+  train.week.idx <- week.idx[1:nrow(weekly.history)]
+  fcst.idx.end <- (nrow(weekly.history) + nrow(weekly.forecast))
+  fcst.week.idx <- week.idx[(nrow(weekly.history) + 1):fcst.idx.end]
+
+  # create features for the multinomial model that estimates yearly seasonality
+  # to the day of week proportions (sin and cos terms) and if its most recent
+  # seasonal period
+  x.train <- data.frame(sin.var=sin(2 * pi / period * train.week.idx),
+                        cos.var=cos(2 * pi / period * train.week.idx),
+                        recent.period=c(rep(0, (nrow(y.train) - period)),
+                                        rep(1, period)),
+                        event.weekday=training.event.weekday,
+                        event.sat=training.event.sat,
+                        event.sun=training.event.sun,
+                        affected.1st=training.affected.1st,
+                        affected.last=training.affected.last)
+
+  x.forecast <- data.frame(sin.var=sin(2 * pi / period * fcst.week.idx),
+                           cos.var=cos(2 * pi / period * fcst.week.idx),
+                           recent.period=rep(1, length(fcst.week.idx)),
+                           event.weekday=forecast.event.weekday,
+                           event.sat=forecast.event.sat,
+                           event.sun=forecast.event.sun,
+                           affected.1st=forecast.affected.1st,
+                           affected.last=forecast.affected.last)
+  dow.predict <- .FitMultinomToDailyProp(y.train, x.train, x.forecast,
+                                        fit.event.terms, fit.season.terms)
+  dow.predict.lower <-
+      .FitMultinomToDailyProp(y.train.lower, x.train, x.forecast,
+                              fit.event.terms, fit.season.terms)
+  dow.predict.upper <-
+      .FitMultinomToDailyProp(y.train.upper, x.train, x.forecast,
+                              fit.event.terms, fit.season.terms)
+  dow.predict.lower <- pmin(dow.predict.lower, dow.predict.upper)
+  dow.predict.upper <- pmax(dow.predict.lower, dow.predict.upper)
+
+  daily.forecast <- data.frame(date=forecast.daily.seq,
+                               forecast=dow.predict * weekly.totals.forecast,
+                               forecast.lower.weekly=
+                               dow.predict.lower * weekly.totals.forecast.lower,
+                               forecast.upper.weekly=
+                               dow.predict.upper * weekly.totals.forecast.upper)
+
+  # Asymptotic prediction intervals are possible but gnarly to compute,
+  # get bootstrap PI instead
+  if (get.pred.int) {
+    dow.pi <- .GetBootstrapCIWeeklyProp(y.train, y.train.lower, y.train.upper,
+                                        x.train, x.forecast, fit.event.terms,
+                                        fit.season.terms, replicates,
+                                        pred.level)
+    daily.forecast$forecast.lower <-
+        dow.pi$dow.prop.lower * weekly.totals.forecast.lower
+    daily.forecast$forecast.upper <-
+        dow.pi$dow.prop.upper * weekly.totals.forecast.upper
+  }
+
+
+  return(daily.forecast)
+
+}
+

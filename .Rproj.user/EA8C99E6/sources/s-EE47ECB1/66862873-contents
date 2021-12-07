@@ -1,0 +1,309 @@
+#' Main forecasting function for clairvoyant package
+#'
+#' @param history: dataframe containing fields for date and actual to forecast
+#' @param training.end.date: last date to be used in training
+#' @param forecast.end.date: date to forecast until (may be moved back)
+#' @param missing.fill: value to fill in missing dates with (default missing)
+#' @param x.features: dataframe containing a column for date and columns for
+#'  each feature used to forecast history$actual, this should include historical values
+#'  as well as values in the forecast period, which may be observed or forecasted
+#' @param event.parameters: list of parameters for event handling obtained
+#'  using EventParameters()
+#' @param pred.level: level for the prediction intervals
+#' @param period: length of seasonal period(s)
+#' @param transform: transformation to apply before forecasting weekly
+#' @param models: models to be used in forecasting weekly
+#' @param consensus.method: function to be used to combine forecasts
+#' @param disaggregation.parameters: list of parameters for daily disaggregation
+#'  obtained using DisaggregationParameters()
+#' @return: list of objects describing the event impact, steps in
+#'  processing the training data, steps in obtaining the weekly/daily forecast,
+#'  and the final daily/weekly forecast
+#' @export
+Clairvoyant <- function(history,
+                        training.end.date, forecast.end.date,
+                        missing.fill=NA,
+                        x.features=NULL,
+                        event.parameters=NULL,
+                        pred.level=0.8,
+                        period=c(364),
+                        transform='Box_Cox',
+                        models=c('AutoArima', 'Arima021', 'Arima012',
+                                 'HWinters'),
+                        consensus.method='median',
+                        aggregation.parameters=NULL) {
+  # Set unset parameters to their defaults if unset:
+  if (is.null(event.parameters)) {
+    event.parameters <- EventParameters(events.schedule=NULL)
+  }
+  if (is.null(aggregation.parameters)) {
+    aggregation.parameters <- AggregationParameters()
+  }
+  # Make sure date is in date format and ordered according to date and
+  #  that all dates are included (and filled with missing.fill if missing)
+  history$date <- as.Date(history$date)
+  history <- history[order(history$date), ]
+  history <- FillMissingDates(history, missing.fill)
+  first.date <- min(history$date)
+
+  # Subset the history to dates that yield an integer number of weeks since
+  # the long term forecasts are at the weekly level
+  train.dates <- .GetBeginEndDates(first.date, training.end.date, "begin.later",
+                                   aggregation.parameters$aggregate.to.longest)
+  fcst.dates <- .GetBeginEndDates((train.dates$end.date + 1), forecast.end.date,
+                                  "end.later",
+                                  aggregation.parameters$aggregate.to.longest)
+  training <- list(unaggregated=
+                     list(raw=subset(history, date >= train.dates$begin.date
+                                       & date <= train.dates$end.date)))
+  forecast <- list()
+
+  if (!is.null(x.features) && (min(x.features$date) <= train.dates$begin.date) &&
+      (max(x.features$date) >= fcst.dates$end.date)) {
+    training$x.features <- list()
+    training$x.features$unaggregated <-
+      subset(x.features, date >= train.dates$begin.date
+             & date <= train.dates$end.date)
+    forecast$x.features <- list()
+    forecast$x.features$unaggregated <-
+      subset(x.features, date >= fcst.dates$begin.date &
+               date <= fcst.dates$end.date)
+  } else if (is.null(x.features)) {
+    training$x.features$unaggregated <-
+      forecast$x.features$unaggregated <- NULL
+  } else {
+    stop(paste('x.features must cover both the training and forecast period',
+               'and must contain a column for date'))
+  }
+  # Smooth the history on dates that there are events and extract the event
+  # impact to forecast on future event dates
+  event.output <- ExtractEventEffects(training$unaggregated$raw, event.parameters,
+                                      train.dates$end.date, fcst.dates$end.date,
+                                      pred.level)
+
+  training$unaggregated$smoothed <- event.output$smooth.history
+
+  # Aggregate the data to weekly to eliminate one level of seasonality
+  # then transform the data using the specified transformation (Box cox finds
+  # the transformation that stabilizes the variance the best
+  periods.agg <- aggregation.parameters$periods.agg
+  agg.transform.ob <-
+    .AggregateAndTransformSmoothed(training$unaggregated$smoothed,
+                                   periods.agg=periods.agg,
+                                   agg.fun=aggregation.parameters$agg.fun,
+                                   longest.period=max(period),
+                                   transform=transform)
+
+  training$transformed <- list(df=agg.transform.ob$transformed,
+                               transform=transform,
+                               box.cox.lambda=agg.transform.ob$box.cox.lambda)
+
+  training$aggregated <- list(smoothed=agg.transform.ob$aggregated)
+  if (!is.null(x.features)) {
+    x.cols <- colnames(x.features)
+    x.cols <- x.cols[x.cols != 'date']
+    if (aggregation.parameters$aggregate.to.longest &&
+        length(periods.agg) > 0) {
+      agg.x.ob <-
+        AggregateToLongest(training$x.features$unaggregated,
+                           cols.agg=x.cols,
+                           periods.agg=periods.agg,
+                           agg.fun=aggregation.parameters$agg.fun,
+                           longest.period=max(period))
+      training$x.features$aggregated <- agg.x.ob
+      x.reg <- subset(training$x.features$aggregated[[paste(max(periods.agg))]],
+                      select=-c(date))
+      agg.x.ob <-
+        AggregateToLongest(forecast$x.features$unaggregated,
+                           cols.agg=x.cols,
+                           periods.agg=periods.agg,
+                           agg.fun=aggregation.parameters$agg.fun,
+                           longest.period=max(period))
+      forecast$x.features$aggregated <- agg.x.ob
+
+      x.future <-
+        subset(forecast$x.features$aggregated[[paste(max(periods.agg))]],
+               select=-c(date))
+    } else {
+      x.reg <- training$x.features$unaggregated
+      x.future <- forecast$x.features$unaggregated
+    }
+  } else {
+    x.reg <- x.future <- NULL
+  }
+
+  period <- agg.transform.ob$period
+  # Fit an ensemble of models to the smoothed (aggregated) and transformed data
+  if (nrow(training$transformed$df) <= 2 * period) {
+    period <- 1
+    cat("\n Seasonal period removed due to lack of sufficient history.\n")
+  }
+  forecast$period <- period
+  forecast$ensemble <- list()
+  for (i in 1:length(models)) {
+    ForecastMethod <- get(models[i])
+    try(forecast$ensemble[[models[i]]] <-
+          ForecastMethod(training$transformed$df,
+                         fcst.dates, period, periods.agg,
+                         pred.level, transform,
+                         training$transformed$box.cox.lambda,
+                         x.reg,
+                         x.future)$forecast,
+        silent=F)
+  }
+
+  # Get the consensus forecast using the specified method
+  forecast$consensus <-
+    GetConsensusForecast(forecast$ensemble, consensus.method)
+
+  # Disaggregate the forecast back into unaggregated numbers using multinomial
+  #  regression if the training data fed to the ensemble was aggregated
+
+  if (aggregation.parameters$aggregate.to.longest &&
+      (length(periods.agg) > 0)) {
+
+    periods.disagg <- periods.agg[periods.agg != max(periods.agg)]
+    periods.disagg <- periods.disagg[order(periods.disagg, decreasing=TRUE)]
+    periods.disaggr <- c(periods.disagg, 1)
+    periods.agg.r <- periods.agg[order(periods.agg, decreasing=TRUE)]
+    periods.aggr <- periods.agg[periods.agg != min(periods.agg)]
+    periods.aggr <-
+      periods.aggr[order(periods.aggr, decreasing=TRUE)] / periods.disagg
+    periods.aggr <- c(period, periods.aggr)
+    disaggregate.format <- aggregation.parameters$disaggregate.format
+    disaggregate.format <- disaggregate.format[order(periods.aggr,
+                                                     decreasing=TRUE)]
+    forecast$disaggregated <- list(smoothed=list())
+    forecast.aggregated <- forecast$consensus
+    for (i in 1:length(periods.disaggr)) {
+
+      if (periods.disaggr[i] == 1) {
+        unaggregated.history <- training$unaggregated$smoothed
+      } else {
+        unaggregated.history <-
+          training$aggregated$smoothed[[paste0(periods.disaggr[i])]]
+      }
+      aggregated.history <-
+        training$aggregated$smoothed[[paste0(periods.agg.r[i])]]
+      forecast$disaggregated$smoothed[[paste0(periods.disaggr[i])]] <-
+        DisaggregateForecast(unaggregated.history,
+                             aggregated.history,
+                             forecast.aggregated,
+                             aggregation.parameters,
+                             event.parameters,
+                             periods.agg.r[i],
+                             periods.aggr[i],
+                             disaggregate.format[i],
+                             pred.level=0.8)
+      forecast.aggregated <-
+        forecast$disaggregated$smoothed[[paste0(periods.disaggr[i])]]
+    }
+
+    # Apply the event effects that were extracted on the forecast dates
+    forecast$final <-
+      ApplyEventEffectsOnForecast(forecast$disaggregated$smoothed[['1']],
+                                  event.parameters,
+                                  event.output$profiles,
+                                  disaggregation.parameters$get.pred.int)
+
+    # Get the final weekly forecast by aggregating the forecast with event
+    # effects applied
+    forecast$aggregated <- list()
+    forecast$aggregated$final <-
+      AggregateToLongest(forecast$final,
+                         cols.agg=c('forecast',
+                                    'forecast.lower.aggr',
+                                    'forecast.upper.aggr'),
+                         periods.agg=periods.agg,
+                         agg.fun=aggregation.parameters$agg.fun,
+                         longest.period=
+                         period * max(periods.agg))
+
+    for (i in 1:length(forecast$aggregated$final)) {
+      print(head(forecast$aggregated$final[[i]]))
+      forecast$aggregated$final[[i]]$forecast.lower <-
+        forecast$aggregated$final[[i]]$forecast.lower.aggr
+      forecast$aggregated$final[[i]]$forecast.upper <-
+        forecast$aggregated$final[[i]]$forecast.upper.aggr
+      forecast$aggregated$final[[i]]$forecast.lower.aggr <-
+        forecast$aggregated$final[[i]]$forecast.upper.aggr <- NULL
+      print(head(forecast$aggregated$final[[i]]))
+
+    }
+    forecast$final$forecast.lower.aggr <-
+      forecast$final$forecast.upper.aggr <- NULL
+  } else {
+    forecast$aggregated$final <- NULL
+    forecast$consensus$forecast.upper.aggr <- forecast$consensus$forecast.upper
+    forecast$consensus$forecast.lower.aggr <- forecast$consensus$forecast.lower
+    forecast$final <-
+      ApplyEventEffectsOnForecast(forecast$consensus,
+                                  event.parameters,
+                                  event.output$profiles,
+                                  disaggregation.parameters$get.pred.int)
+    forecast$consensus$forecast.upper.aggr <-
+      forecast$consensus$forecast.lower.aggr <- NULL
+  }
+
+  # If there are data not used in training (after the train.end.date) use this
+  # to do evaluation of the forecast values
+  evaluation <- EvaluateClairvoyant(history, forecast$final,
+                                    aggregation.parameters=
+                                      aggregation.parameters,
+                                    aggregated.histories=
+                                      training$aggregated$smoothed,
+                                    aggregated.forecasts=
+                                      forecast$aggregated$final,
+                                    longest.period=max(periods.agg) * period,
+                                    get.unagg.pred.int=
+                                      aggregation.parameters$get.pred.int)
+
+  return(list(training=training,
+              event.output=event.output$profiles,
+              forecast=forecast,
+              evaluation=evaluation))
+
+}
+
+#' Function for rolling daily forecast for clairvoyant package
+#'
+#' @param history: dataframe containing fields for date and actual to forecast
+#' @param missing.fill: value to fill in missing dates with (default missing)
+#' @param event.parameters: list of parameters for event handling obtained
+#'  using EventParameters()
+#' @param pred.level: level for the prediction intervals
+#' @param period: length of seasonal period (in weeks)
+#' @param transform: transformation to apply before forecasting weekly
+#' @param models: models to be used in forecasting weekly
+#' @param consensus.method: function to be used to combine forecasts
+#' @param disaggregation.parameters: list of parameters for daily disaggregation
+#'  obtained using DisaggregationParameters()
+#' @param days.out.forecast: number of days out to return forecast for
+#' @return: the forecast 7 days out from the last training date
+#' @export
+RollingClairvoyant <- function(history,
+                               missing.fill=NA,
+                               event.parameters=NULL,
+                               pred.level=0.8,
+                               period=52,
+                               transform='Box_Cox',
+                               models=c('AutoArima', 'Arima021',
+                                        'Arima012', 'HWinters'),
+                               consensus.method='median',
+                               disaggregation.parameters=NULL,
+                               days.out.forecast=7) {
+  # Assume this function receives streaming data (updated daily) and use all
+  # available data to forecast the next 2 weeks (to get the forecast for the
+  # next week (or 8 days away depending on if ordered a week before or a week
+  # and a day)
+  training.end.date <- max(as.Date(history$date))
+  forecast.end.date <- training.end.date + 2 * days.out.forecast + 1
+  next.2weeks.forecast <- Clairvoyant(history, training.end.date,
+                                      forecast.end.date, missing.fill,
+                                      event.parameters, pred.level, period,
+                                      transform, models, consensus.method,
+                                      disaggregation.parameters)
+  return(next.2weeks.forecast$forecast$daily$final[days.out.forecast, ])
+}
+
+

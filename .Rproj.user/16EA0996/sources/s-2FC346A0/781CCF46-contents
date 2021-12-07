@@ -1,0 +1,20 @@
+Package: clairvoyant
+Type: R
+Title: Forecasting demand with calendar time effects
+Version: 0.1.0
+Author: Amy Richardson
+Maintainer: Amy Richardson <amy.richardson.phd@gmail.com>
+Description: Forecasts demand (long and short term rolling forecast) for Crisp takehome test. Also computes key merics such as product delivery volume, age, delivery precision, revenue and profit. Produces key graphics to detail the results.
+License: 
+Imports:
+     dplyr,
+     forecast,
+     ggplot2,
+     grid,
+     nnet,
+     parallel,
+     plyr,
+     reshape,
+     scales,
+     zoo
+LazyData: true

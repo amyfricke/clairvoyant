@@ -1,0 +1,138 @@
+#' Internal method for getting begin.date and end.date. Dates
+#' are adjusted so that they span an integer number of weeks.
+#'
+#' @param begin.date Candidate start date
+#' @param end.date Candidate end date (inclusive)
+#' @param fix.date.option whether to cut data to the right or
+#'   left (end.later vs begin.later)
+#' @param need.integer.period whether an integer number of
+#'   periods are needed (if aggregating)
+#' @param period length of the period for which
+#' @return A list containing a begin.date and an end.date
+#' @noRd
+.GetBeginEndDates <- function(begin.date, end.date, fix.date.option,
+                              need.integer.period=TRUE, period=7) {
+  stopifnot((!is.null(begin.date) && !is.null(end.date)))
+
+  begin.date <- as.Date(begin.date)
+  end.date <- as.Date(end.date)
+
+  if (!need.integer.period) {
+    return(list(begin.date=begin.date, end.date=end.date))
+  }
+
+  # Make sure training data covers an integer # of periods
+  # if we are aggregating over seasonal periods
+  l.d <- length(seq(begin.date, end.date, by=1))
+  seq.d <- rep(c(1:period), ceiling(l.d / period))
+  begin.d <- seq.d[1]
+  end.d <- seq.d[l.d] + 1
+  if (begin.d != end.d) {
+    delta <- end.d - begin.d
+    if (delta < 0) {
+      delta <- delta + period
+    }
+
+    if (fix.date.option == "begin.later") {
+      original.begin.date <- begin.date
+      begin.date <- begin.date + delta
+    } else {
+      original.end.date <- end.date
+      end.date <- end.date + (period - delta)
+    }
+  }
+
+  stopifnot(as.integer(end.date + 1 - begin.date,
+                       units="days") %% period == 0)
+
+  return(list(begin.date=begin.date, end.date=end.date))
+}
+
+#' Function to take data frame with potentially missing values for dates and
+#' replace them with fill.default
+#'
+#' @param history A data frame with two mandatory fields of date and actual
+#' @param fill.default To replace the missing values if fill.default is not
+#'   provided NA's will be used.
+#' @return The timeseries with missing dates filled by fill.default.
+FillMissingDates <- function(history, fill.default = NA) {
+  stopifnot(is.na(fill.default) | is.numeric(fill.default))
+  colnames(history) <- c("date", "actual")
+  history$date <- as.Date(history$date)
+  history$actual <- as.numeric(history$actual)
+  # The starting date of new.history would be the first date in history
+  start.date <- min(history$date, na.rm = TRUE)
+  # The end date of new.history would be the maximum date in history
+  end.date <- max(history$date, na.rm = TRUE)
+  history <- history[history$date >= start.date & history$date <= end.date, ]
+  all.dates <- seq(from = start.date, to = end.date, by = "day")
+  # Find missing dates
+  missing.dates <- setdiff(as.character(all.dates), as.character(history$date))
+  missing.data <- data.frame(
+    date = as.Date(missing.dates),
+    actual = rep(fill.default, length(missing.dates))
+  )
+  new.history <- rbind(history, missing.data)
+  new.history <- new.history[order(new.history$date), ]
+  row.names(new.history) <- 1:length(new.history$actual)
+  return(new.history)
+}
+
+#' Internal function to generate a transformed time series
+#'
+#' @param history vector of values to transform
+#' @param transform transformation to apply, options are log, none or box cox
+#' @param box.cox.lambda lambda value for the box cox transformation if applied
+#' @return A vector of the transformed series
+#' @noRd
+.TransformTimeSeries <- function(history, transform='Box_Cox',
+                                 box.cox.lambda=1) {
+
+  stopifnot(transform %in% c('Log', 'Box_Cox', 'None'))
+  if (transform == 'Log' || box.cox.lambda == 0) {
+    t.history <- log(history)
+  } else if (transform == 'Box_Cox' && box.cox.lambda != 1) {
+    t.history <- (history ^ box.cox.lambda - 1) / box.cox.lambda
+  } else {
+    t.history <- history
+  }
+  return(t.history)
+}
+
+#' Internal function to back transform a time series
+#'
+#' @param history vector of values to back transform
+#' @param transform transformation applied, options are log, none or Box Cox
+#' @param box.cox.lambda lambda value for the Box Cox transformation if applied
+#' @return A vector of the back transformed series
+#' @noRd
+.BackTransformTimeSeries <- function(history, transform='Box_Cox',
+                                     box.cox.lambda=1) {
+  # Internal function to back transform a time series
+  stopifnot(transform %in% c('Log', 'Box_Cox', 'None'))
+  if (transform == 'Log' || box.cox.lambda == 0) {
+    b.history <- exp(history)
+  } else if (transform == 'Box_Cox' && box.cox.lambda != 1) {
+    b.history <- (box.cox.lambda * history + 1) ^ (1 / box.cox.lambda)
+  } else {
+    b.history <- history
+  }
+  return(b.history)
+}
+
+#' Helper (internal) function to divide vectors that might have 0s at the same
+#'  places
+#'
+#' @param x: vector in the numerator
+#' @param y: vector in the denominator
+#' @return: x / y
+#' @noRd
+.Divide0 <- function(x, y) {
+  # Internal function to yield x / y for x and y vectors, yields 1 when xi=yi=0
+  z <- x / y
+  z[which(x == 0 & y == 0)] <- 1
+  return(z)
+}
+
+
+

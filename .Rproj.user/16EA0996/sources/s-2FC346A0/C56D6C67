@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1580109558837.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "C56D6C67",
+    "lastKnownWriteTime" : 1580175045,
+    "last_content_update" : 1580175045802,
+    "path" : "~/CrispTakeHome_AmyRichardson/clairvoyant/R/disaggregate_to_daily.R",
+    "project_path" : "R/disaggregate_to_daily.R",
+    "properties" : {
+        "cursorPosition" : "14,58",
+        "scrollLine" : "0"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 5,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

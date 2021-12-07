@@ -1,0 +1,23 @@
+Package: clairvoyant
+Type: R
+Title: Forecasting sensitivity analyses with calendar time effects
+Version: 0.1.0
+Author: Amy Richardson 
+Maintainer: Amy Richardson <amy.richardson.phd@gmail.com>
+Description: Conducts ensemble forecasting and sensivity analysis for datetime indexed timeseries.  Produces key graphics to detail the results.
+License: 
+Imports:
+     data.table,
+     dplyr,
+     forecast,
+     ggplot2,
+     grid,
+     lubridate,
+     nnet,
+     nnfor,
+     parallel,
+     plyr,
+     scales,
+     zoo
+LazyData: true
+RoxygenNote: 7.1.2.9000

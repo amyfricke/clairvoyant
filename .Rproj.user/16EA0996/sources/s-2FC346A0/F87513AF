@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1580110925041.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "F87513AF",
+    "lastKnownWriteTime" : 1580175073,
+    "last_content_update" : 1580175073965,
+    "path" : "~/Crisp/clairvoyant2/clairvoyant/PineappleNotebook.R",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "82,0",
+        "scrollLine" : "0"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 11,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

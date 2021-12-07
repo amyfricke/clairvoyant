@@ -1,0 +1,415 @@
+
+#' Function to set a list of Disaggregation parameters
+#'
+#' @param aggregate.to.longest: whether to aggregate to the longest period
+#'   (models that can have <= 1 seasonal period, like arima, are then feasible)
+#' @param periods.agg: seasonal periods to aggregate over
+#' @param fit.season.terms: whether to fit terms estimating seasonal effects to
+#'   the day of week proportions
+#' @param get.pred.int.daily: whether to get a prediction interval for predicted
+#'   day of week proportions (bootstrap intervals obtained)
+#' @param replicates: number of bootstrap replicates for above prediction
+#'   interval
+#' @return: list of parameters for disaggregation to daily
+#' @export
+AggregationParameters <- function(aggregate.to.longest=TRUE,
+                                  periods.agg=c(7),
+                                  agg.fun='sum',
+                                  disaggregate.format=c('format'="%a"),
+                                  fit.season.terms=TRUE,
+                                  get.pred.int=TRUE,
+                                  replicates=600) {
+  aggregation.parameters <- list()
+
+  stopifnot(aggregate.to.longest %in% c(TRUE, FALSE))
+  aggregation.parameters$aggregate.to.longest <- aggregate.to.longest
+
+  stopifnot(all(round(periods.agg) - periods.agg == 0))
+  aggregation.parameters$periods.agg <- periods.agg
+
+  stopifnot(agg.fun %in% c('sum', 'min', 'max', 'mean', 'median'))
+  aggregation.parameters$agg.fun <- agg.fun
+
+  stopifnot(!is.null(names(disaggregate.format)))
+  aggregation.parameters$disaggregate.format <- disaggregate.format
+
+  stopifnot(fit.season.terms %in% c(TRUE, FALSE))
+  aggregation.parameters$fit.season.terms <- fit.season.terms
+
+  stopifnot(get.pred.int %in% c(TRUE, FALSE))
+  aggregation.parameters$get.pred.int <- get.pred.int
+
+  stopifnot(round(replicates) - replicates == 0)
+  aggregation.parameters$replicates <- replicates
+  return(aggregation.parameters)
+}
+
+#' Helper (internal) function to Aggregate a single period of history
+#'
+#' @param idx: index of the history to aggregate the prior week over
+#' @param agg.fun: aggregation function
+#' @param period: length of the period being aggregated
+#' @param history: dataframe of the daily history with date and actual fields
+#' @param cols.agg: vector of column names to aggregate
+#' @return: one row data frame with aggregated history
+#' @noRd
+.AggOnePeriod <- function(idx, agg.fun='sum', period, history,
+                          cols.agg=c('actual', 'actual.lower',
+                                      'actual.upper')) {
+  agg.fun <- get(agg.fun)
+  if (period == 1) return(history[cols.agg][idx])
+  period.m1 <- period - 1
+  if (length(cols.agg) > 1) {
+    aggr <- apply(history[cols.agg][(idx - period.m1):idx,], 2, agg.fun)
+  } else if (length(cols.agg) == 1) {
+    aggr <- agg.fun(history[cols.agg][(idx - period.m1):idx,])
+    names(aggr) <- cols.agg
+  }
+  aggr <- as.data.frame(t(aggr))
+  aggr$date <- history$date[idx]
+  aggr <- aggr[, c(ncol(aggr), 1:length(cols.agg))]
+
+  return(aggr)
+}
+
+#' Function to Aggregate to the longest seasonal period buckets
+#'
+#' @param history: Data frame for the unaggregated history.
+#'   The required fields are date and actual.
+#' @param periods.agg: the shorter seasonal periods to aggregate over
+#' @param agg.fun: the aggregation function
+#' @param cols.agg: vector of columns to aggregate
+#' @param longest.period: the longest seasonal period (that is not
+#'   being aggregated over)
+#' @return: weekly.history: Data frame for weekly history
+AggregateToLongest <- function(history,
+                               periods.agg=c(7),
+                               agg.fun='sum',
+                               cols.agg=c('actual', 'actual.lower',
+                                          'actual.upper'),
+                               longest.period=364) {
+  periods.agg <- periods.agg[order(periods.agg)]
+  periods.agg.new <- periods.agg / c(1, periods.agg[-length(periods.agg)])
+  unaggregated.history <- history
+  aggregated.history.list <- list()
+  period.m1 <- 1
+  for (period in periods.agg) {
+    period.m <- period / period.m1
+    n.unaggregated <- nrow(unaggregated.history)
+    p.i <- rep(c(period.m:1), ceiling(n.unaggregated / period.m))
+    p.i <- rev(p.i[1:n.unaggregated])
+    filter.p <- which(p.i == period.m)
+    filter.p <- filter.p[filter.p > (period.m - 1)]
+
+    aggregated.history.tmp <- sapply(filter.p, .AggOnePeriod,
+                                     history=unaggregated.history,
+                                     agg.fun=agg.fun,
+                                     period=period.m,
+                                     cols.agg=cols.agg)
+
+    aggregated.history.tmp <- data.frame(t(aggregated.history.tmp))
+    aggregated.history <-
+      data.frame(date = as.Date(unlist(aggregated.history.tmp$date),
+                                origin="1970-01-01"))
+    for (i in 1:length(cols.agg)) {
+      aggregated.history[cols.agg[i]] <-
+         as.numeric(unlist(aggregated.history.tmp[cols.agg[i]]))
+    }
+    aggregated.history.list[[paste(period)]] <- aggregated.history
+    unaggregated.history <- aggregated.history
+    period.m1 <- period
+
+  }
+  return(aggregated.history.list)
+}
+
+
+#' Function to get the multinomial model predictions to disaggregate an
+#'  aggregated forecast (perhaps aggregated to weekly)
+#'
+#' @param y.train: matrix with the historical day of week proportions,
+#' @param x.train: dataframe containing the sine and cosine terms to use in
+#'   day of week multinomial model for each bootstrap replicate (training)
+#' @param x.forecast: dataframe containing the variables used for the multinom
+#'  model for the forecast dates
+#' @param fit.season.terms: whether to fit seasonality terms for changes in the
+#'   day of week proportions due to seasonality
+#' @return day of week proportions for the forecast dates
+#' @noRd
+.FitMultinomToDisaggregate <- function(y.train, x.train, x.forecast,
+                                       fit.season.terms=F) {
+
+  # Fit multinomial regression to the counts of orders on each day (such that
+  #  it always adds to the same number) using the nnet package
+  model.statement <- 'y.train ~ recent.period'
+
+  if (fit.season.terms) {
+    model.statement <- paste(model.statement, '+ sin.var + cos.var')
+  }
+
+  dow.mn <- nnet::multinom(formula(model.statement), x.train, type='probs',
+                           trace=FALSE)
+
+  dow.predict <- predict(dow.mn, x.forecast, type='probs')
+  dow.predict <- as.vector(t(dow.predict))
+  return(dow.predict)
+}
+
+#' Function to get the dow multinomial model predictions on one bootstrap
+#' replicate
+#'
+#' @param idx: indices corresponding to the bootstrap sample
+#' @param y.train: matrix with the historical day of week proportions,
+#' @param x.train: dataframe containing the sine and cosine terms to use in
+#'   day of week multinomial model for each bootstrap replicate (training)
+#' @param x.forecast: dataframe containing the sine and cosine terms for the
+#'  forecast dates
+#' @param fit.season.terms: whether to fit seasonality terms for changes in the
+#'   day of week proportions due to seasonality
+#' @return day of week proportions for the forecast dates based on bootstrap
+#'   sample
+#' @noRd
+.FitMultinomOnBootRep <- function(idx, y.train, x.train, x.forecast,
+                                  fit.season.terms) {
+  y.train <- y.train[idx, ]
+  x.train <- x.train[idx, ]
+
+  return(.FitMultinomToDisaggregate(y.train, x.train, x.forecast,
+                                  fit.season.terms))
+}
+
+#' Function to retrieve a quantile from a bootstrap sample of estimates
+#'
+#' @param x: boostrap sample of estimates,
+#' @param pred.level: prediction interval level
+#' @param lower: boolean indicating if the lower limit (quantile) is desired
+#' @return: the bootstrap quantile for the desired level and limit
+#' @noRd
+.GetBootQuantile <- function(x, pred.level, lower=T) {
+  if (lower) {
+    prob <- (1 - pred.level) / 2
+  } else {
+    prob <- 1 - ((1 - pred.level) / 2)
+  }
+  return(quantile(x, prob))
+}
+
+#' Function to bootstrap the disaggregated proportion predictions
+#'
+#' @param y.train: matrix with the historical day of week proportions,
+#' @param y.train.lower: matrix with the historical lower limit day of week
+#'  proportions
+#' @param y.train.upper: matrix with the historical upper limit day of week
+#'  proportions
+#' @param x.train: dataframe containing the sine and cosine terms to use in
+#'   day of week multinomial model for each bootstrap replicate (training)
+#' @param x.forecast: dataframe containing the sine and cosine terms for the
+#'  forecast dates
+#' @param fit.season.terms: whether to fit seasonality terms for changes in the
+#'   day of week proportions due to seasonality
+#' @param replicates: number of bootstrap replicates
+#' @param pred.level: level for the prediction intervals
+#' @return: list containing the forecasted lower prediction
+#'   limit and upper prediction limit for the day of week proportions
+#' @noRd
+.GetBootstrapCIDisaggProp <- function(y.train, y.train.lower, y.train.upper,
+                                      x.train, x.forecast,
+                                      fit.season.terms=F, replicates=600,
+                                      pred.level=0.8) {
+  replicates.main <- ceiling(replicates * pred.level)
+  replicates.low <- ceiling(replicates * ((1 - pred.level) / 2))
+  replicates.up <- replicates - replicates.main - replicates.low
+
+  idx.boot <- matrix(sample(c(1:nrow(y.train)),
+                            (nrow(y.train) * replicates.main),
+                            replace=T), ncol=replicates.main)
+  idx.boot.low <- matrix(sample(c(1:nrow(y.train.lower)),
+                                (nrow(y.train.lower) * replicates.low),
+                                replace=T), ncol=replicates.low)
+  idx.boot.up <- matrix(sample(c(1:nrow(y.train.upper)),
+                               (nrow(y.train.upper) * replicates.up),
+                               replace=T), ncol=replicates.up)
+
+  mn.boot <- apply(idx.boot, 2, .FitMultinomOnBootRep,
+                   y.train=y.train, x.train=x.train, x.forecast=x.forecast,
+                   fit.season.terms=fit.season.terms)
+  mn.boot.low <- apply(idx.boot.low, 2, .FitMultinomOnBootRep,
+                       y.train=y.train.lower, x.train=x.train,
+                       x.forecast=x.forecast,
+                       fit.season.terms=fit.season.terms)
+  mn.boot.up <- apply(idx.boot.up, 2, .FitMultinomOnBootRep,
+                      y.train=y.train.upper, x.train=x.train,
+                      x.forecast=x.forecast,
+                      fit.season.terms=fit.season.terms)
+  mn.boot <- cbind(mn.boot, mn.boot.low)
+  mn.boot <- cbind(mn.boot, mn.boot.up)
+
+
+  prop.lower <- apply(mn.boot, 1, .GetBootQuantile,
+                      pred.level=pred.level)
+  prop.upper <- apply(mn.boot, 1, .GetBootQuantile,
+                      pred.level=pred.level, lower=F)
+  return(data.frame(prop.lower=prop.lower,
+                    prop.upper=prop.upper))
+
+}
+
+#' Disaggregate the weekly total forecast to daily sums using multinomial
+#'  regression
+#'
+#' @param daily.history: dataframe containing fields for date, actual,
+#'   actual.lower actual.upper at the daily level
+#' @param aggregated.history: dataframe containing the above fields at the
+#'  aggregated level
+#' @param aggregated.forecast: dataframe containing the aggregated forecast (w/
+#'  lower + upper prediction limits (date, forecast, forecast.lower and .upper)
+#' @param aggregation.parameters: list of aggregation parameters
+#' @param event.parameters: list of event parameters
+#' @param aggregated.period: length of longest seasonal period in aggregated
+#'   buckets
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit at the daily level
+#' @export
+DisaggregateForecast <- function(unaggregated.history,
+                                 aggregated.history,
+                                 aggregated.forecast,
+                                 aggregation.parameters=NULL,
+                                 event.parameters=NULL,
+                                 disaggregate.period=7,
+                                 aggregated.period=52,
+                                 disaggregate.format=c('format'="%a"),
+                                 pred.level=0.8) {
+
+  fit.season.terms <- aggregation.parameters$fit.season.terms
+  get.pred.int <- aggregation.parameters$get.pred.int
+  replicates <- aggregation.parameters$replicates
+
+  # Get the day of week proportions and forecast this to disaggregate to daily
+  aggr.totals.history <- unaggregated.history
+  aggr.totals.history$actual <- rep(aggregated.history$actual,
+                                   each=disaggregate.period)
+  aggr.totals.history$actual.lower <- rep(aggregated.history$actual.lower,
+                                         each=disaggregate.period)
+  aggr.totals.history$actual.upper <- rep(aggregated.history$actual.upper,
+                                         each=disaggregate.period)
+  aggr.totals.forecast <- rep(aggregated.forecast$forecast,
+                              each=disaggregate.period)
+
+  # Since the aggregated smoothed actuals are stochastic since some are predicted
+  # get the lower and upper totals as well
+  aggr.totals.forecast.lower <- rep(aggregated.forecast$forecast.lower,
+                                    each=disaggregate.period)
+  aggr.totals.forecast.upper <- rep(aggregated.forecast$forecast.upper,
+                                    each=disaggregate.period)
+
+  disaggr.proportions <- unaggregated.history
+  disaggr.proportions$proportion <-
+    unaggregated.history$actual / aggr.totals.history$actual
+  disaggr.proportions$proportion.lower <-
+    unaggregated.history$actual.lower / aggr.totals.history$actual.lower
+  disaggr.proportions$proportion.upper <-
+    disaggr.proportions$actual.upper / aggr.totals.history$actual.upper
+
+  forecast.disaggr.seq <- seq((max(unaggregated.history$date) + 1),
+                              max(aggregated.forecast$date), by=1)
+  if (!is.null(disaggregate.format)) {
+    format.disaggr <- get(names(disaggregate.format))
+    disaggr.inst.train <- format.disaggr(unaggregated.history$date,
+                                         disaggregate.format)
+    disaggr.inst.forecast <- format.disaggr(forecast.disaggr.seq,
+                                            disaggregate.format)
+  } else {
+    disaggr.inst.train <- rep(1:disaggregate.period,
+                              ceiling((nrow(unaggregated.history) /
+                                         disaggregate.period)))
+    disaggr.inst.train <- disaggr.inst.train[1:nrow(unaggregated.history)]
+    disaggr.inst.forecast <- rep(1:disaggregate.period,
+                                 ceiling((length(forecast.disaggr.seq) /
+                                         disaggregate.period)))
+    disaggr.inst.train <- disaggr.inst.train[1:length(forecast.disaggr.seq)]
+  }
+
+  # Create training data for a multinomial model for day of week
+  # this model enforces the disaggregated proportions to add to 1
+  y.train <- y.train.upper <- y.train.lower <-
+    data.frame(idx=c(1:nrow(aggregated.history)))
+  for (dtmp in disaggr.inst.forecast[1:disaggregate.period]) {
+    y.train[[paste0('proportion.', tolower(dtmp))]] <-
+      disaggr.proportions$proportion[disaggr.inst.train == dtmp]
+    y.train.lower[[paste0('proportion.', tolower(dtmp))]] <-
+      disaggr.proportions$proportion.lower[disaggr.inst.train == dtmp]
+    y.train.upper[[paste0('proportion.', tolower(dtmp))]] <-
+      disaggr.proportions$proportion.upper[disaggr.inst.train == dtmp]
+  }
+  y.train$idx <- y.train.lower$idx <- y.train.upper$idx <- NULL
+
+  y.train <- round(mean(aggregated.history$actual) * as.matrix(y.train))
+  y.train.lower <- (round(mean(aggregated.history$actual.lower) *
+                            as.matrix(y.train.lower)))
+  y.train.upper <- (round(mean(aggregated.history$actual.upper) *
+                            as.matrix(y.train.upper)))
+
+  n.periods.train.fcst <-
+    ceiling((nrow(aggregated.history) +
+               nrow(aggregated.forecast)) / aggregated.period)
+  aggr.idx <- rep(1:aggregated.period, n.periods.train.fcst)
+  train.aggr.idx <- aggr.idx[1:nrow(aggregated.history)]
+  fcst.idx.end <- (nrow(aggregated.history) + nrow(aggregated.forecast))
+  fcst.aggr.idx <- aggr.idx[(nrow(aggregated.history) + 1):fcst.idx.end]
+
+  # create features for the multinomial model that estimates aggregated
+  # seasonality to the disaggregated proportions (sin and cos terms) and
+  # if its the most recent seasonal period
+  x.train <- data.frame(sin.var=sin(2 * pi / aggregated.period *
+                                      train.aggr.idx),
+                        cos.var=cos(2 * pi / aggregated.period *
+                                      train.aggr.idx),
+                        recent.period=c(rep(0, (nrow(y.train) -
+                                                aggregated.period)),
+                                        rep(1, aggregated.period)))
+
+  x.forecast <- data.frame(sin.var=sin(2 * pi / aggregated.period *
+                                         fcst.aggr.idx),
+                           cos.var=cos(2 * pi / aggregated.period *
+                                         fcst.aggr.idx),
+                           recent.period=rep(1, length(fcst.aggr.idx)))
+  disaggr.predict <- .FitMultinomToDisaggregate(y.train, x.train, x.forecast,
+                                                fit.season.terms)
+  disaggr.predict.lower <-
+    .FitMultinomToDisaggregate(y.train.lower, x.train, x.forecast,
+                               fit.season.terms)
+  disaggr.predict.upper <-
+    .FitMultinomToDisaggregate(y.train.upper, x.train, x.forecast,
+                               fit.season.terms)
+  disaggr.predict.lower <- pmin(disaggr.predict.lower, disaggr.predict.upper)
+  disaggr.predict.upper <- pmax(disaggr.predict.lower, disaggr.predict.upper)
+
+  disaggregated.forecast <-
+    data.frame(date=forecast.disaggr.seq,
+               forecast=disaggr.predict * aggr.totals.forecast,
+               forecast.lower.aggr= disaggr.predict.lower *
+                 aggr.totals.forecast.lower,
+               forecast.upper.aggr= disaggr.predict.upper *
+                 aggr.totals.forecast.upper)
+
+  # Asymptotic prediction intervals are possible but gnarly to compute,
+  # get bootstrap PI instead
+  if (get.pred.int) {
+    disaggr.pi <- .GetBootstrapCIDisaggProp(y.train, y.train.lower,
+                                            y.train.upper,
+                                            x.train, x.forecast,
+                                            fit.season.terms,
+                                            replicates,
+                                            pred.level)
+    disaggregated.forecast$forecast.lower <-
+      disaggr.pi$prop.lower * aggr.totals.forecast.lower
+    disaggregated.forecast$forecast.upper <-
+      disaggr.pi$prop.upper * aggr.totals.forecast.upper
+  }
+
+
+  return(disaggregated.forecast)
+
+}
+

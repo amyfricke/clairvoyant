@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1580109856468.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "F83C6292",
+    "lastKnownWriteTime" : 1580109877,
+    "last_content_update" : 1580109877642,
+    "path" : "~/CrispTakeHome_AmyRichardson/clairvoyant/R/weekly_forecast.R",
+    "project_path" : "R/weekly_forecast.R",
+    "properties" : {
+        "cursorPosition" : "51,45",
+        "scrollLine" : "0"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 9,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

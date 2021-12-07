@@ -1,0 +1,26 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1636562547376.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "E6C6A49E",
+    "lastKnownWriteTime" : 1636786238,
+    "last_content_update" : 1636786238876,
+    "path" : "~/R/MyPackages/clairvoyant/R/aggregation_and_disaggregation.R",
+    "project_path" : "R/aggregation_and_disaggregation.R",
+    "properties" : {
+        "cursorPosition" : "14,59",
+        "scrollLine" : "8",
+        "tempName" : "Untitled3"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 9,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

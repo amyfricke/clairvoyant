@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1635107257700.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "E92667B2",
+    "lastKnownWriteTime" : 1636753795,
+    "last_content_update" : 1636753795266,
+    "path" : "~/R/MyPackages/clairvoyant/R/ensemble_forecast.R",
+    "project_path" : "R/ensemble_forecast.R",
+    "properties" : {
+        "cursorPosition" : "398,36",
+        "scrollLine" : "387"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 6,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

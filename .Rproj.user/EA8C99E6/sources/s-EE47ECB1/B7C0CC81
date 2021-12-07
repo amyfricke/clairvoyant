@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1636485120817.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "B7C0CC81",
+    "lastKnownWriteTime" : 1636659114,
+    "last_content_update" : 1636659114449,
+    "path" : "~/R/MyPackages/clairvoyant/R/utility_functions.R",
+    "project_path" : "R/utility_functions.R",
+    "properties" : {
+        "cursorPosition" : "36,39",
+        "scrollLine" : "32"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 8,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

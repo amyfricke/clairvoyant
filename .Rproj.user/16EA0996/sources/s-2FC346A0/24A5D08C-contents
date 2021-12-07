@@ -1,0 +1,443 @@
+
+#' Function to create needed hyper parameters for event handling
+#'
+#' @param events.schedule: dataframe containing columns for date and event
+#' @param days.before: number of days before the event to smooth/estimate effect
+#' @param days.after: number of days after the event to smooth/estimate effect
+#' @param weeks.before: number of weeks before the event to use in smoothing/
+#'    effect estimation
+#' @param log.scale: whether or not to fit effects on the log scale
+#' @return: A list containing the hyperparameters needed to smooth events and
+#'   estimate their effects
+#' @export
+EventParameters <- function(events.schedule, days.before=1, days.after=1,
+                            weeks.before=10, log.scale=TRUE, pred.level=0.8) {
+  event.parameters <- list()
+
+  stopifnot(c('date', 'event') %in% colnames(events.schedule) ||
+            is.null(events.schedule))
+  event.parameters$events.schedule <- events.schedule
+
+  stopifnot(days.before >= 0 && round(days.before) == days.before)
+  event.parameters$days.before <- days.before
+
+  stopifnot(days.after >= 0 && round(days.after) == days.after)
+  event.parameters$days.after <- days.after
+
+  stopifnot(weeks.before >= 0 && round(weeks.before) == weeks.before)
+  event.parameters$weeks.before <- weeks.before
+
+  stopifnot(log.scale %in% c(TRUE, FALSE))
+  event.parameters$log.scale <- log.scale
+
+  stopifnot(pred.level >= 0 && pred.level <= 1)
+  event.parameters$pred.level <- pred.level
+
+  return(event.parameters)
+}
+
+#' Function to get a list of dates affected by events
+#'
+#' @param events.schedule: input events schedule
+#' @param days.before: number of days before that are affected for each event
+#' @param days.after: number of days after that are affected for each event
+#' @return: A vector of dates affected by events.
+#' @noRd
+GetAffectedList <- function(events.schedule, days.before=1, days.after=1) {
+  if (is.null(events.schedule)) return(NULL)
+  len.sched <- nrow(events.schedule)
+
+  event.names <- as.character(events.schedule$event)
+  event.dates <- events.schedule$date
+  GetEventWindow <- function(event) {
+    return(data.frame(before=days.before, after=days.after))
+  }
+  event.windows <- lapply(event.names, GetEventWindow)
+  GetEventDates <- function(index) {
+    # A function that computes the actuals dates in the window computed
+    # by GetEventWindow
+    event.date <- event.dates[index]
+    before <- event.windows[[index]]$before
+    after <- event.windows[[index]]$after
+    dates <- seq(event.date - before, event.date + after, by="day")
+    return(as.character(dates))
+  }
+  affected.dates <- lapply(1:len.sched, GetEventDates)
+  affected.dates <- as.Date(unique(unlist(affected.dates)))
+  return(affected.dates[order(affected.dates)])
+}
+
+#' Function to smooth events in the history using the input event schedule and
+#' extract impact of these events
+#' Method:
+#'   For each event impact is calculated
+#'   on 3 consecutive days (1 before and 1 day after).
+#'   To extract impact, the function extrapolates a value based on an auto arima
+#'   forecast using the same-day of week values weeks.back before the event
+#'   The impact is calculated as the forecast of these events minus (or divide
+#'    if log transformed) of the actual value and each value used to interpolate
+#'   what the value would have been if there was no event
+#'
+#' @param history: Data frame for the daily history. The required fields are
+#'       date and actual.
+#' @param event.parameters: An EventParameters() object
+#' @param trainend.date : The ending date of the training data
+#' @param fcst.date : The ending date of the forecast period
+#'
+#' @return list containing:
+#'     - smooth.history: the history with events smoothed out.
+#'     - event.profile list: a list of data which contains:
+#'        -- impact: a data frame where each row represents an event and
+#'                    its impact vector from exponentially weighted factors.
+#'        -- impact.lower: similar to impact, but containing the lower limit of
+#'            a confidence interval for the impact factor
+#'        -- impact.upper: similar to impact, but containing the upper limit of
+#'            a confidence interval for the impact factor
+#'        -- trainend.date is the end date of the training period
+#' @export
+ExtractEventEffects <-
+    function(history, event.parameters,
+             trainend.date, fcst.date, pred.level=0.8) {
+
+  events.schedule <- event.parameters$events.schedule
+
+  days.before <- event.parameters$days.before
+  days.after <- event.parameters$days.after
+  profile.len <- days.before + days.after + 1
+  weeks.back <- event.parameters$weeks.before
+
+  log.scale <- event.parameters$log.scale
+  pred.level.event <-
+      c(pred.level, min(c(pred.level, event.parameters$pred.level)))
+
+  # Initialize the smoothed history to the history and set new fields for the
+  # upper and lower prediction limits for the smoothed points in the series
+  smooth.history <- history
+  smooth.history$actual.lower <- smooth.history$actual.upper <- history$actual
+  history.len <- nrow(history)
+  # Vector of events and affected days (do not use in smoothing)
+  affected.dates <- GetAffectedList(events.schedule, days.before, days.after)
+  na.dates <- subset(history, is.na(actual))$date
+  na.dates <- na.dates[!na.dates %in% affected.dates]
+  if (length(na.dates) > 0) {
+    na.dates <- data.frame(date=as.Date(na.dates),
+                           event=rep('Missing', length(na.dates)))
+    events.schedule <- rbind(events.schedule, na.dates)
+    affected.dates <- c(affected.dates, na.dates$date)
+  }
+  if (is.null(events.schedule)) {
+    return(list('smooth.history'=smooth.history, 'profiles'=NULL))
+  }
+  events.schedule <- events.schedule[order(events.schedule$event), ]
+  events.list <- events.schedule[!duplicated(events.schedule$event), ]
+  events.len <- nrow(events.list)
+  # Order chronologically
+  events.chron <- events.schedule[order(events.schedule$date), ]
+  events.list <- events.list[order(events.list$date), ]
+  event.effect.list <- list()
+  # The profile of impact factors covers profile.len days
+  profiles <- list(impact = data.frame(event = events.list$event,
+                                       array(1, c(events.len, profile.len))),
+                   impact.lower = data.frame(event = events.list$event,
+                                       array(1, c(events.len, profile.len))),
+                   impact.upper = data.frame(event = events.list$event,
+                                       array(1, c(events.len, profile.len))),
+                   trainend.date = trainend.date, fcstend.date = fcst.date)
+  # We can smooth any events that are at least minwkb weeks after the
+  # training start date
+  minwkb <- min(weeks.back, 2)
+  first.dt <- history$date[1] + minwkb * 7
+  last.dt <- history$date[history.len]
+  # Here the list of events and affected days is reordered such that dates
+  # where there is not enough history to smooth are still smoothed
+  # at the end of the loop using estimates of the event impact factor
+  events.reordered <- rbind(events.chron[events.chron$date > first.dt, ],
+                            events.chron[events.chron$date <= first.dt, ])
+  events.reordered$enough.time <- (events.chron$date > first.dt)
+  for (i in 1:nrow(events.reordered)) {
+    j <- match(events.reordered$event[i], events.list$event)
+
+    # Get all dates of the event and determine the max and min
+    # (to allow defining a time series of all actuals before each event)
+    event.i <- events.reordered$event[i]
+    event.dates <- subset(events.reordered, event == event.i &
+                          enough.time & date <= last.dt &
+                          date >= first.dt)$date
+    is.min.event.date <- (events.reordered$date[i] == min(event.dates))
+    is.max.event.date <- (events.reordered$date[i] == max(event.dates) &&
+                          event.i != 'Missing')
+
+    # Expand the datelist so that even if the event is in the near
+    # future (within before days), ExtractEventEffects still works.
+    datelist <- c(history$date,
+                  seq(from=max(history$date) + 1, by=1, length=days.after))
+    if (is.element(events.reordered$date[i], datelist)) {
+      k <- match(events.reordered$date[i], datelist)
+      # Smooth the history using history of adjacent days.
+      d <- as.POSIXlt(events.reordered$date[i])
+      d.before <- ifelse(event.i == 'Missing', 0, 1)
+      d.after <- ifelse(event.i == 'Missing', 0, 1)
+      for (m in -d.before:d.after) {
+        # name the event to store preceding values to predict event effect
+        event.c <- paste0(event.i, m)
+        # smooth if there is at least minwkb weeks before
+        if ((k + m - minwkb * 7 > 1) && (k + m < history.len)) {
+          # This loop finds the estimated event effect by predicting the value
+          # that would have occured without an event using prior values before
+          # the event date. It only uses values on the same dow and can predict
+          # on the log scale (if log.scale=TRUE) or raw scale
+          w.back <- min(ceiling((k + m - 7) / 7), weeks.back)
+
+          prior.values <- rep(NA, w.back)
+          prior.values.idx <- seq(k + m - 7, k + m - 7 * w.back, by = -7)
+          prior.values.indx <-
+              zoo::index(prior.values.idx) * (prior.values.idx > 0)
+          prior.values.idx <- prior.values.idx * (prior.values.idx > 0)
+          prior.values[prior.values.indx] <-
+             smooth.history$actual[prior.values.idx]
+          if (log.scale) prior.values <- log(prior.values)
+          prior.values.df <- data.frame(idx=prior.values.indx,
+                                        actual=prior.values)
+          prior.values.df <- subset(prior.values.df, !is.na(actual))
+          prior.values.df$idx <-
+              prior.values.df$idx - min(prior.values.df$idx, na.rm=T)
+
+          prior.values.df <- prior.values.df[order(prior.values.df$idx), ]
+          smoothed.ts <- ts(prior.values.df$actual)
+          smoothed.arima <- try(forecast::auto.arima(smoothed.ts))
+          if (all(class(smoothed.arima) != 'try-error')) {
+            smoothed.pred <-
+                forecast::forecast(smoothed.arima, h=1,
+                                   level=pred.level.event)
+            int <- smoothed.pred$mean
+            int.low <- smoothed.pred$lower[, order(pred.level.event)]
+            int.up <- smoothed.pred$upper[, order(pred.level.event)]
+            if (log.scale) {
+              int <- exp(int)
+              int.low <- exp(int.low)
+              int.up <- exp(int.up)
+            }
+          } else {
+            int <- history$actual[(k + m)]
+            int.low <- int.up <- rep(history$actual[(k + m)], 2)
+          }
+          # Set the history to smoothed value if it is signficantly different
+          # than the original value allowing it to be used in
+          # the computation of future smoothed values. Also store the lower and
+          # upper prediction interval for the smoothed history
+          if (int.low[2] > history$actual[(k + m)] ||
+              int.up[2] < history$actual[(k + m)] ||
+              is.na(history$actual[(k + m)])) {
+            smooth.history$actual[k + m] <- int
+            smooth.history$actual.lower[(k + m)] <- int.low[1]
+            smooth.history$actual.upper[(k + m)] <- int.up[1]
+          }
+          if (log.scale) {
+            event.actual <- log(history$actual[(k + m)])
+          } else {
+            event.actual <- history$actual[(k + m)]
+          }
+          event.effects <- event.actual - prior.values.df$actual
+          if (is.min.event.date) {
+            event.effect.list[[event.c]] <- event.effects
+          } else {
+            event.effects.prior <- event.effect.list[[event.c]]
+            event.effect.list[[event.c]] <-
+              c(event.effects.prior, event.effects)
+          }
+          pindex <- m + days.before + 2  # index in the profile
+
+          if (is.max.event.date) {
+            event.effects.all <- as.vector(event.effect.list[[event.c]])
+            effect.ts <- ts(event.effects.all)
+            effect.arima <- try(forecast::auto.arima(effect.ts), silent=T)
+            effect.pred <-
+                try(forecast::forecast(effect.arima, h=1,
+                                       level=c(pred.level.event)), silent=T)
+            if (!any(class(effect.pred) == 'try-error')) {
+              effect.pred$lower <- effect.pred$lower[, order(pred.level.event)]
+              effect.pred$upper <- effect.pred$upper[, order(pred.level.event)]
+              if (log.scale && (effect.pred$lower[2] > 0 ||
+                                effect.pred$upper[2] < 0)) {
+                profiles$impact[j, pindex] <- exp(effect.pred$mean)
+                profiles$impact.lower[j, pindex] <- exp(effect.pred$lower[1])
+                profiles$impact.upper[j, pindex] <- exp(effect.pred$upper[1])
+              } else if (effect.pred$lower[2] > 0 || effect.pred$upper[2] < 0) {
+                profiles$impact[j, pindex] <- effect.pred$mean
+                profiles$impact.lower[j, pindex] <- effect.pred$lower[1]
+                profiles$impact.upper[j, pindex] <- effect.pred$upper[1]
+              }
+            }
+          }
+        } else {
+          # If the event does not have at least minwkb weeks of history
+          # before smooth the history using the estimated event impact
+          # effect computed for each event above
+          pindex <- m + days.before + 2
+          if (k + m <= history.len && k + m > 0) {
+            if (log.scale) {
+              smooth.actual <- log(smooth.history$actual[k + m])
+              event.impact <- log(profiles$impact[j, pindex])
+              impact.lower <- log(profiles$impact.lower[j, pindex])
+              impact.upper <- log(profiles$impact.upper[j, pindex])
+            } else {
+              smooth.actual <- smooth.history[k + m]
+              event.impact <- profiles$impact[j, pindex]
+              impact.lower <- profles$impact.lower[j, pindex]
+              impact.upper <- profiles$impact.upper[j, pindex]
+            }
+            smooth.history$actual[k + m] <- smooth.actual - event.impact
+            smooth.history$actual.lower[k + m] <- smooth.actual - impact.upper
+            smooth.history$actual.upper[k + m] <- smooth.actual - impact.lower
+            if (log.scale) {
+              smooth.history$actual[k + m] <- exp(smooth.history$actual[k + m])
+              smooth.history$actual.lower[k + m] <-
+                  exp(smooth.history$actual.lower[k + m])
+              smooth.history$actual.upper[k + m] <-
+                  exp(smooth.history$actual.upper[k + m])
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return(list('smooth.history'=smooth.history, 'profiles'=profiles))
+}
+
+#' Function to apply extracted event effects to event dates in the forecast
+#'
+#' @param daily.forecast: dataframe with date, forecast, forecast.lower.weekly,
+#'  forecast.upper.weekly and possibly forecast.upper and forecast.lower
+#' @param event.parameters: list of parameters for event handling
+#' @param event.profiles: output of ExtractEventEffect(): a matrix of event
+#'   effects
+#' @param get.daily.pred.int: boolean indicating if daily prediction intervals
+#'  are available in the daily.forecast object and to apply event prediction
+#'  intervals
+#' @return: dataframe containing forecast with event effects applied to event
+#'  dates in the forecast-these have to be in the event schedule that was input
+ApplyEventEffectsOnForecast <- function(daily.forecast, event.parameters,
+                                        event.profiles, get.daily.pred.int) {
+  events.schedule <- event.parameters$events.schedule
+  days.before <- event.parameters$days.before
+  days.after <- event.parameters$days.after
+
+  weeks.back <- event.parameters$weeks.before
+  log.scale <- event.parameters$log.scale
+
+  if (is.null(events.schedule)) return(daily.forecast)
+  trainend.date <- event.profiles$trainend.date
+
+  # initialize the event impact column for the event impact forecast
+  current.pos.impact <- current.neg.impact <- current.pos.impact.lower <-
+      current.neg.impact.lower <- current.pos.impact.upper <-
+          current.neg.impact.upper <- rep(ifelse(log.scale, 1, 0),
+                                                  nrow(daily.forecast))
+
+  if (nrow(events.schedule[events.schedule$date > trainend.date, ]) == 0) {
+    return(daily.forecast)
+  }
+  for (i in 1:nrow(events.schedule)) {
+    if (is.element(events.schedule$event[i],
+                   event.profiles$impact$event)) {
+      if (!events.schedule$date[i] %in% daily.forecast$date) next
+      event.index <- match(events.schedule$date[i], daily.forecast$date)
+      effect.index <- match(
+        events.schedule$event[i],
+        event.profiles$impact$event
+      )
+
+      # Apply the extracted event effects, but don't apply more than one effect
+      #  if there are two events on a given date - just apply the max positive
+      #  effect and min negative effect
+      #  Also get the upper and lower limits for the event effect
+
+      for (m in -days.before:days.after) {
+        if (event.index + m > 0 && event.index + m <= nrow(daily.forecast)) {
+          #  Input positive event effect if a positive event effect hasn't
+          #  been estimated for date event.index + m or if the estimated
+          #  impact is greater than the impact for another already event
+          #  adjusted for.
+          current.pos.impact[event.index + m] <-
+              max(event.profiles$impact[effect.index, (m + days.before + 2)],
+                  current.pos.impact[event.index + m],
+                  na.rm = T)
+          current.pos.impact.upper[event.index + m] <-
+              max(event.profiles$impact[effect.index, (m + days.before + 2)],
+                  current.pos.impact.upper[event.index + m],
+                  na.rm = T)
+
+          # For the lower prediction limit of the positive impact, take the
+          #  minimum effect if there are multiple days
+          current.pos.impact.lower[event.index + m] <-
+              min(event.profiles$impact[effect.index, (m + days.before + 2)],
+                  current.pos.impact.lower[event.index + m],
+                  na.rm = T)
+
+          #  Input negative event effect if a negative event effect hasn't
+          #  been estimated for date event.index + m or if the estimated
+          #  impact is greater than the impact for another already event
+          #  adjusted for.
+          current.neg.impact[event.index + m] <-
+              min(event.profiles$impact[effect.index, (m + days.before + 2)],
+                  current.neg.impact[event.index + m],
+                na.rm = T)
+
+          current.neg.impact.lower[event.index + m] <-
+              min(event.profiles$impact[effect.index, (m + days.before + 2)],
+                  current.neg.impact.upper[event.index + m],
+                  na.rm = T)
+
+          # For the upper prediction limit of the negative impact, take the
+          #  maximum effect if there are multiple days
+          current.neg.impact.upper[event.index + m] <-
+              max(event.profiles$impact[effect.index, (m + days.before + 2)],
+                  current.pos.impact.upper[event.index + m],
+                  na.rm = T)
+
+        }
+      }
+    }
+  }
+  event.impact.forecast <- daily.forecast
+  # Total event effect is sum (or product) of negative (< 0 or < 1) and positive
+  #  effects (> 0 or > 1).
+  if (log.scale) {
+    total.impact <- current.pos.impact * current.neg.impact
+    event.impact.forecast$forecast <- daily.forecast$forecast * total.impact
+
+    total.impact.lower <- current.pos.impact.lower * current.neg.impact.lower
+    total.impact.upper <- current.pos.impact.upper * current.neg.impact.upper
+    if (get.daily.pred.int) {
+      event.impact.forecast$forecast.lower <-
+          daily.forecast$forecast.lower * total.impact.lower
+      event.impact.forecast$forecast.upper <-
+          daily.forecast$forecast.upper * total.impact.upper
+    }
+    event.impact.forecast$forecast.lower.weekly <-
+        daily.forecast$forecast.lower.weekly * total.impact.lower
+    event.impact.forecast$forecast.upper <-
+        daily.forecast$forecast.upper.weekly * total.impact.upper
+  } else {
+    total.impact <- current.pos.impact + current.neg.impact
+    event.impact.forecast$forecast <- daily.forecast$forecast + total.impact
+    total.impact.lower <- current.pos.impact.lower + current.neg.impact.lower
+    total.impact.upper <- current.pos.impact.upper + current.neg.impact.upper
+    if (get.daily.pred.int) {
+      event.impact.forecast$forecast.lower <-
+          daily.forecast$forecast.lower + total.impact.lower
+      event.impact.forecast$forecast.upper <-
+          daily.forecast$forecast.upper + total.impact.upper
+    }
+    event.impact.forecast$forecast.lower.weekly <-
+        daily.forecast$forecast.lower.weekly + total.impact.lower
+    event.impact.forecast$forecast.upper <-
+        daily.forecast$forecast.upper.weekly + total.impact.upper
+
+  }
+
+  return(event.impact.forecast)
+
+}
+

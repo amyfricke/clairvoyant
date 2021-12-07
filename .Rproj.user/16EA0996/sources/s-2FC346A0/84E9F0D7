@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1580109717582.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "712274478",
+    "id" : "84E9F0D7",
+    "lastKnownWriteTime" : 1580199118,
+    "last_content_update" : 1580199118502,
+    "path" : "~/CrispTakeHome_AmyRichardson/clairvoyant/R/compute_volume_age_revenue.R",
+    "project_path" : "R/compute_volume_age_revenue.R",
+    "properties" : {
+        "cursorPosition" : "128,50",
+        "scrollLine" : "121"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 7,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

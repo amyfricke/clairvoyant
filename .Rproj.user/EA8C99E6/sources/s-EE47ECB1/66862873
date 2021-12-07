@@ -1,0 +1,26 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1636610393665.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "66862873",
+    "lastKnownWriteTime" : 1636834596,
+    "last_content_update" : 1636834596100,
+    "path" : "~/R/MyPackages/clairvoyant/R/clairvoyant_forecast_tmp.R",
+    "project_path" : "R/clairvoyant_forecast_tmp.R",
+    "properties" : {
+        "cursorPosition" : "121,48",
+        "scrollLine" : "95",
+        "tempName" : "Untitled3"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 10,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

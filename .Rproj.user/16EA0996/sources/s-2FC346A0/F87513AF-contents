@@ -1,0 +1,136 @@
+source("Downloads/clairvoyant/utility_functions.R")
+source("Downloads/clairvoyant/explainable_anomaly_handling.R")
+source("Downloads/clairvoyant/weekly_forecast.R")
+source("Downloads/clairvoyant/disaggregate_to_daily.R")
+source("Downloads/clairvoyant/clairvoyant_forecast.R")
+source("Downloads/clairvoyant/compute_volume_age_revenue.R")
+source("Downloads/clairvoyant/evaluate_forecast.R")
+
+events.schedule <- read.csv("Downloads/clairvoyant/events.schedule.csv",
+                            stringsAsFactors=FALSE)
+events.schedule$date <- as.Date(events.schedule$date)
+events.schedule$X <- NULL
+
+demand.influx.freq <-
+    read.csv("Downloads/clairvoyant/backtested_influx_demand_key_metrics.csv",
+             stringsAsFactors=F)
+demand.influx.freq$date <- as.Date(demand.influx.freq$date)
+
+demand.influx.vol <-
+  read.csv("Downloads/clairvoyant/alternative_backtested_influx_demand_key_metrics.csv",
+           stringsAsFactors=F)
+demand.influx.vol$date <- as.Date(demand.influx.vol$date)
+
+pineapple.sales2 <- read.csv("Downloads/clairvoyant/pineapple_sales.csv",
+                             stringsAsFactors=F)
+pineapple.sales2$date <- as.Date(pineapple.sales2$date)
+
+
+# Event handling test:
+
+event.parameters <- EventParameters(events.schedule=events.schedule)
+pineapple.clairvoyant <-
+  Clairvoyant(pineapple.sales2, as.Date('2019-05-10'), as.Date('2019-09-15'),
+              event.parameters=event.parameters,
+              models=c("AutoArima", "Arima021", "Arima012", "HWinters"))
+
+null.event.parameters <-  EventParameters(events.schedule=NULL)
+pineapple.clairvoyant.null.events <-
+  Clairvoyant(pineapple.sales2, as.Date('2019-05-10'), as.Date('2019-09-15'),
+              event.parameters=null.event.parameters,
+              models=c("AutoArima", "Arima021", "Arima012", "HWinters"))
+
+PlotErrorComparison(pineapple.clairvoyant, pineapple.clairvoyant.null.events,
+                    'with event handling', 'without event handling',
+                     dates.annotations=events.schedule, log.scale=T)
+
+## Look at other events
+pineapple.clairvoyant <-
+  Clairvoyant(pineapple.sales2, as.Date('2019-04-16'), as.Date('2020-04-15'),
+              event.parameters=event.parameters,
+              models=c("AutoArima", "Arima021", "Arima012", "HWinters"))
+
+pineapple.clairvoyant.null.events <-
+  Clairvoyant(pineapple.sales2, as.Date('2019-04-16'), as.Date('2019-09-15'),
+              event.parameters=null.event.parameters,
+              models=c("AutoArima", "Arima021", "Arima012", "HWinters"))
+PlotErrorComparison(pineapple.clairvoyant, pineapple.clairvoyant.null.events,
+                    'with event handling', 'without event handling',
+                    dates.annotations=events.schedule, log.scale=T,
+                    n.error=17)
+
+pineapple.clairvoyant <-
+  Clairvoyant(pineapple.sales, as.Date('2019-03-02'), as.Date('2020-04-15'),
+              event.parameters=event.parameters,
+              models=c("AutoArima", "Arima021", "Arima012", "HWinters"))
+
+# Look at seasonal day of week
+disaggregation.parameters <-
+    DisaggregationParameters(fit.season.terms=T)
+pineapple.clairvoyant.seasonal.dow <-
+  Clairvoyant(pineapple.sales2, as.Date('2019-03-02'), as.Date('2020-04-15'),
+              event.parameters=event.parameters,
+              disaggregation.parameters=disaggregation.parameters,
+              models=c("AutoArima", "Arima021", "Arima012", "HWinters"))
+PlotErrorComparison(pineapple.clairvoyant.seasonal.dow,
+                    pineapple.clairvoyant,
+                    'with seasonal day of week', 'without',
+                    dates.annotations='DOW', log.scale=T,
+                    n.error=14)
+
+PlotTrainingActualAndForecast(pineapple.clairvoyant)
+PlotErrorComparison(pineapple.clairvoyant, short.term=F, freq='weekly')
+
+# Weekly key metrics
+pineapple.key.metrics.sample.week <- demand.influx.freq[13:19,]
+write.csv(pineapple.key.metrics.sample.week,
+          "Downloads/clairvoyant/demand_influx_week_sample.csv", quote=F,
+          row.names=F)
+PlotPrecisionAndVolumeByAge(pineapple.key.metrics.sample.week)
+PlotRevenueProfitCost(pineapple.key.metrics.sample.week)
+
+PlotRevenueProfitCost(head(subset(demand.influx.freq, conf.level==.15), 28),
+                       dt.format="%Y-%m-%d")
+PlotPrecisionAndVolumeByAge(head(subset(demand.influx.freq, conf.level==.15), 28),
+                            dt.format="%Y-%m-%d")
+
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .3))
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics='opportunity.cost')
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics='number.of.precision.misses',
+                              metrics.scale=scales::number)
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics='precision.ytd',
+                              metrics.scale=scales::percent)
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics='precision.penalty',
+                              metrics.scale=scales::percent)
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics='freezing.loss')
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics='precision.penalty.loss')
+
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .2),
+                              metrics=c( 'opportunity.cost', 'freezing.loss',
+                                         'precision.penalty.loss'),
+                              metrics.name='Losses')
+PlotMetricsbyForecastQuantile(subset(demand.influx.freq, conf.level > .1),
+                              metrics=c( 'opportunity.cost', 'freezing.loss'),
+                              metrics.name='Opportunity cost and freezing loss')
+
+
+demand.influx.vol, 'Frequency penalty', 'Volume % penalty')
+
+pineapple.backtest.orders <- BackTestOrdering(pineapple.sales2,
+                                              as.Date('2019-03-02'),
+                                              as.Date('2019-03-30'),
+                                              event.parameters=event.parameters)
+
+
+
+
+
+
+
+

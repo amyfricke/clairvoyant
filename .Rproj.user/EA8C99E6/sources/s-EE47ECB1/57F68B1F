@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1636485702590.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "2673726262",
+    "id" : "57F68B1F",
+    "lastKnownWriteTime" : 1636783529,
+    "last_content_update" : 1636783529438,
+    "path" : "~/R/MyPackages/clairvoyant/R/explainable_anomaly_handling.R",
+    "project_path" : "R/explainable_anomaly_handling.R",
+    "properties" : {
+        "cursorPosition" : "445,42",
+        "scrollLine" : "436"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,930 @@
+
+#' Function to find a Box Cox transformation on a series with trend and
+#'  (possibly) seasonality
+#'
+#' @param history dataframe of dates and actuals to find a Box Cox transform for
+#' @param seasonality boolean indicating if seasonality should be applied
+#' @param period integer giving the length of the seasonal periods
+#' @return The paramater controlling the Box Cox transformation found
+GetBoxCoxTransform <- function(history, seasonality=FALSE,
+                               period=52) {
+  # Find the Box Cox transformation for a time series
+  history$date.idx <- c(1:nrow(history))
+  if (seasonality && period > 1) {
+    history$season.idx <- as.factor(history$date.idx %% period)
+    bxcx <- MASS::boxcox(actual ~ date.idx + season.idx,
+                         lambda=seq(0, 1, by=.1), plotit=F, data=history)
+  } else {
+    bxcx <- MASS::boxcox(actual ~ date.idx, lambda=seq(0, 1, by=.1),
+                         plotit=F, data=history)
+  }
+  box.cox.lambda <- bxcx$x[which.max(bxcx$y)]
+  return(box.cox.lambda)
+}
+
+#' Function to aggregate and transform a smoothed weekly time series
+#'
+#' @param history: smoothed history to transform acutals columns
+#' @param cols.transform: columns to transform
+#' @param transform: transformation to apply
+#' @param period: seasonality period
+#' @return transformed + aggregated data frame and aggregated dataframe
+#' @noRd
+.AggregateAndTransformSmoothed <- function(history,
+                                           aggregate.to.longest=TRUE,
+                                           periods.agg=c(7),
+                                           agg.fun='sum',
+                                           longest.period=364,
+                                           cols.transform=c('actual',
+                                                            'actual.lower',
+                                                            'actual.upper'),
+                                           transform='Box_Cox') {
+
+  if (aggregate.to.longest) {
+    aggregated.list <- AggregateToLongest(history,
+                                          periods.agg=periods.agg,
+                                          agg.fun=agg.fun,
+                                          cols.agg=c('actual', 'actual.lower',
+                                                     'actual.upper'),
+                                          longest.period=longest.period)
+    pre.transform <- aggregated.list[[paste(max(periods.agg))]]
+    period <- longest.period / (max(periods.agg))
+  } else {
+    aggregated.list <- NULL
+    pre.transform <- history
+    period <- longest.period
+  }
+  history.list <- list()
+  history.list$aggregated <- aggregated.list
+  transformed <- pre.transform
+  history.list$period <- period
+
+  if (transform == 'Box_Cox') {
+    box.cox.lambda <- GetBoxCoxTransform(pre.transform,
+                                         seasonality=(period > 1),
+                                         period=period)
+  } else {
+    box.cox.lambda <- 1
+  }
+  history.list$box.cox.lambda <- box.cox.lambda
+  for (i in 1:length(cols.transform)) {
+    transformed[cols.transform[i]] <-
+        .TransformTimeSeries(pre.transform[cols.transform[i]],
+                             transform=transform,
+                             box.cox.lambda=box.cox.lambda)
+  }
+  history.list$transformed <- transformed
+  return(history.list)
+}
+
+#' Function to back transform a smoothed weekly forecast
+#'
+#' @param history: smoothed history to transform acutals columns
+#' @param cols.transform: columns to transform
+#' @param transform: transformation to apply
+#' @param box.cox.lambda: box cox parameter for transformation
+#' @return transformed data frame
+#' @noRd
+.BackTransformForecast <- function(forecast.transformed,
+                                   cols.transform=c('forecast',
+                                                    'forecast.lower',
+                                                    'forecast.upper'),
+                                   transform='Box_Cox',
+                                   box.cox.lambda=1) {
+   forecast.backtransformed <- forecast.transformed
+   for (i in 1:length(cols.transform)) {
+     forecast.backtransformed[cols.transform[i]] <-
+         .BackTransformTimeSeries(forecast.transformed[cols.transform[i]],
+                                  transform=transform,
+                                  box.cox.lambda=box.cox.lambda)
+     }
+  return(list(forecast=forecast.backtransformed))
+}
+
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#'  Finds a forecast using feed forward neural net autoregressive model
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Nnetar <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                   pred.level=0.8,
+                   transform='Box_Cox', box.cox.lambda=1,
+                   x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training, xreg=x.reg))
+
+    fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
+                               level=pred.level, xreg=x.future)
+  } else {
+    nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training))
+
+    fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
+                               level=pred.level)
+  }
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=as.vector(fcst$lower),
+                        forecast.upper=as.vector(fcst$upper))
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#'  Finds the optimal arima forecast
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+AutoArima <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                      pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                      x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    autoarima.fit <- suppressWarnings(
+        forecast::auto.arima(ts.training, biasadj=T, max.D=1, max.P=1, max.Q=1,
+                             max.p=3, max.q=3, parallel=TRUE,
+                             xreg=as.matrix(x.reg)))
+
+    fcst <- forecast::forecast(autoarima.fit, h=len.fcst, level=pred.level,
+                               xreg=as.matrix(x.future))
+  } else {
+    autoarima.fit <- suppressWarnings(
+      forecast::auto.arima(ts.training, biasadj=T, max.D=1, max.P=1, max.Q=1,
+                           max.p=3, max.q=3, parallel=TRUE))
+
+    fcst <- forecast::forecast(autoarima.fit, h=len.fcst, level=pred.level)
+  }
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=as.vector(fcst$lower),
+                        forecast.upper=as.vector(fcst$upper))
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+
+  return(fcst.df)
+
+}
+
+#'  Option for forecasting (aggregated or disaggregated, long term or short term).
+#'  Finds the arima forecast with order (0, 2, 1) (and optionally, seasonal order
+#'  0,1,1)
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Arima021 <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                     pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                     x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+
+  pdq.order <- c(0, 2, 1)
+  if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    fcst <- predict(arima(ts.training, order=pdq.order, xreg=x.reg,
+                          seasonal=seasonal.order), len.fcst,
+                    newxreg=x.future)$pred
+
+    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
+    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+  } else {
+    fcst <- predict(arima(ts.training, order=pdq.order, xreg=x.reg,
+                          seasonal=seasonal.order), len.fcst,
+                    newxreg=x.future)$pred
+
+    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
+    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+  }
+  fcst.lower <-
+    fcst.lower.pred$pred -
+    qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  fcst.upper <-
+    fcst.upper.pred$pred +
+    qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#'  Finds the arima forecast with order (0, 1, 2) (and optionally, seasonal order
+#'  0,1,1)
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Arima012 <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                     pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                     x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+
+  pdq.order <- c(0, 1, 2)
+  if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    fcst <- predict(arima(ts.training, order=pdq.order, xreg=x.reg,
+                          seasonal=seasonal.order), len.fcst,
+                    newxreg=x.future)$pred
+
+    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
+    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+  } else {
+    fcst <- predict(arima(ts.training, order=pdq.order, xreg=x.reg,
+                          seasonal=seasonal.order), len.fcst,
+                    newxreg=x.future)$pred
+
+    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
+    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+  }
+  fcst.lower <-
+    fcst.lower.pred$pred -
+    qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  fcst.upper <-
+    fcst.upper.pred$pred +
+    qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformWeeklyForecast(fcst.df, transform=transform,
+                                          box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#'  Finds the arima forecast with order (0, 1, 1) (and optionally, seasonal order
+#'  0,1,1)
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Arima011 <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                     pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                     x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+
+  pdq.order <- c(0, 1, 1)
+  if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    fcst <- predict(arima(ts.training, order=pdq.order, xreg=x.reg,
+                          seasonal=seasonal.order), len.fcst,
+                    newxreg=x.future)$pred
+
+    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
+    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+  } else {
+    fcst <- predict(arima(ts.training, order=pdq.order, xreg=x.reg,
+                          seasonal=seasonal.order), len.fcst,
+                    newxreg=x.future)$pred
+
+    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
+    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                             seasonal=seasonal.order, xreg=x.reg)
+    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+  }
+  fcst.lower <-
+      fcst.lower.pred$pred -
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  fcst.upper <-
+      fcst.upper.pred$pred +
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' OOption for forecasting (aggregated or disaggregated, long term or short term).
+#'  Finds the Holt Winters forecast. Cannot incorporate external regressors
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+HWinters <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                     pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                     x.reg=NULL, x.future=NULL) {
+
+  stopifnot(is.null(x.reg) && is.null(x.future))
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+
+  seasonality <- (period > 1)
+  seasonal <- 'add'
+  fcst <- predict(HoltWinters(ts.training,
+                              seasonal=seasonal), len.fcst, seasonality,
+                  level=pred.level)[, 1]
+
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  hw.fit.lower <- HoltWinters(ts.training.lower, gamma=seasonality,
+                              seasonal=seasonal)
+  fcst.lower <- predict(hw.fit.lower, len.fcst, T, level=pred.level)[, 3]
+
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+  hw.fit.upper <- HoltWinters(ts.training.upper, gamma=seasonality,
+                              seasonal=seasonal)
+  fcst.upper <- predict(hw.fit.upper, len.fcst, T, level=pred.level)[, 2]
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' Gets an STL decomposition and then forecasts using ets
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+StlEts <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                   pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                   x.reg=NULL, x.future=NULL) {
+  stopifnot(is.null(x.reg) && is.null(x.future))
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+
+  stlets.fit <- suppressWarnings(
+      forecast::stlm(ts.training, biasadj=T, method='ets'))
+
+  fcst <- forecast::forecast(stlets.fit, h=len.fcst, level=pred.level,
+                             allow.multiplicative.trend=TRUE)
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=as.vector(fcst$lower),
+                        forecast.upper=as.vector(fcst$upper))
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' Gets an STL decomposition and then forecasts using theta
+#'
+##' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+StlTheta <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                     pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                     x.reg=NULL, x.future=NULL) {
+
+  stopifnot(is.null(x.reg) && is.null(x.future))
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  stltheta.fit <- suppressWarnings(stl(ts.training, s.window= 7 +  4 * seq(6)))
+
+  fcst <- forecast::forecast(stltheta.fit, h=len.fcst, forecastfunction=thetaf,
+                             level=pred.level)
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=as.vector(fcst$lower),
+                        forecast.upper=as.vector(fcst$upper))
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' Gets an STL decomposition and then forecasts using thief mlp
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+StlMlp <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                   pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                   x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  stl.fit <- suppressWarnings(stl(ts.training, s.window= 7 +  4 * seq(6)))
+
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    fcst <- forecast::forecast(stl.fit, h=len.fcst,
+                               forecastfunction=nnfor::mlp.thief,
+                               level=pred.level, xreg=x.reg, newxreg=x.future)
+  } else {
+    fcst <- forecast::forecast(stl.fit, h=len.fcst,
+                               forecastfunction=nnfor::mlp.thief,
+                               level=pred.level)
+  }
+  pred.level2 <- (1 - pred.level) / 2
+  fcst.std <- apply(fcst$all.mean, 1, FUN=sd)
+  fcst.lower <- fcst$mean + qnorm(pred.level2) * fcst.std
+  fcst.upper <- fcst$mean - qnorm(pred.level2) * fcst.std
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' Gets an STL decomposition and then forecasts using thief elm
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+StlElm <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                   pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                   x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  stl.fit <- suppressWarnings(stl(ts.training, s.window= 7 +  4 * seq(6)))
+
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    fcst <- forecast::forecast(stl.fit, h=len.fcst,
+                               forecastfunction=nnfor::elm.thief,
+                               level=pred.level, xreg=x.reg, newxreg=x.future)
+  } else {
+    fcst <- forecast::forecast(stl.fit, h=len.fcst,
+                               forecastfunction=nnfor::elm.thief,
+                               level=pred.level)
+  }
+
+  pred.level2 <- (1 - pred.level) / 2
+  fcst.std <- apply(fcst$all.mean, 1, FUN=sd)
+  fcst.lower <- fcst$mean + qnorm(pred.level2) * fcst.std
+  fcst.upper <- fcst$mean - qnorm(pred.level2) * fcst.std
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' using thief mlp
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+#'
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Mlp <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    x.all <- rbind(x.reg, x.future)
+    mlp.fit <- suppressWarnings(nnfor::mlp(ts.training, xreg=x.all,
+                                           lags=0, reps=50))
+    fcst <- forecast::forecast(mlp.fit, h=len.fcst,
+                               level=pred.level)
+  } else {
+    mlp.fit <- suppressWarnings(nnfor::mlp(ts.training, reps=50))
+    fcst <- forecast::forecast(mlp.fit, h=len.fcst,
+                               level=pred.level)
+  }
+
+  pred.level2 <- (1 - pred.level) / 2
+  fcst.std <- apply(fcst$all.mean, 1, FUN=sd)
+  fcst.lower <- fcst$mean + qnorm(pred.level2) * fcst.std
+  fcst.upper <- fcst$mean - qnorm(pred.level2) * fcst.std
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' using thief elm
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+#'
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Elm <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                x.reg=NULL, x.future=NULL) {
+
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    x.all <- rbind(x.reg, x.future)
+    elm.fit <- suppressWarnings(nnfor::elm(ts.training, type='lasso',
+                                           comb='median', lags=0, reps=50,
+                                           xreg=x.all))
+    fcst <- forecast::forecast(elm.fit, h=len.fcst,
+                               level=pred.level, xreg=x.all)
+  } else {
+    elm.fit <- suppressWarnings(nnfor::elm(ts.training, type='lasso',
+                                           comb='median', reps=50))
+    fcst <- forecast::forecast(elm.fit, h=len.fcst,
+                               level=pred.level)
+  }
+
+  pred.level2 <- (1 - pred.level) / 2
+
+  fcst.std <- apply(fcst$all.mean, 1, FUN=sd)
+  fcst.lower <- fcst$mean + qnorm(pred.level2) * fcst.std
+  fcst.upper <- fcst$mean - qnorm(pred.level2) * fcst.std
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$mean,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting (aggregated or disaggregated, long term or short term).
+#' using bsts forecast
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in aggregated buckets of periods.agg)
+#' @param periods.agg: periods that training data (and forecast will be) are
+#'   aggregated over
+#' @param pred.level: level for the prediction intervals
+#' @param transform: the transformation applied and thus the inverse to apply to get
+#'   forecast on the original scale
+#' @param box.cox.lambda: the value of the box cox lambda in the event the transform
+#'   is 'Box_Cox'
+#' @param x.reg: an optional dataframe of external regressors
+#' @param x.future an optional (but required if x.reg is not null) of future external
+#'   regressors
+#'
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Bsts <- function(history, fcst.dates, period=52, periods.agg=c(7),
+                 pred.level=0.8, transform='Box_Cox', box.cox.lambda=1,
+                 x.reg=NULL, x.future=NULL) {
+  set.seed(2021)
+  fcst.interval <- max(c(1, periods.agg))
+  fcst.dates.seq <- seq((fcst.dates$begin.date + (fcst.interval - 1)),
+                        fcst.dates$end.date, by=fcst.interval)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  pred.level2 <- (1 - pred.level) / 2
+
+  if (!is.null(x.reg) && !is.null(x.future)) {
+    for (xcol in colnames(x.reg)) {
+      assign(xcol, x.reg[[xcol]])
+    }
+    bsts.form <- paste('ts.training ~', paste(colnames(x.reg), collapse=' + '))
+    bsts.form <- as.formula(bsts.form)
+    ss <- bsts::AddDynamicRegression(list(), bsts.form)
+    ss <- bsts::AddStudentLocalLinearTrend(ss, y=ts.training)
+    ss <- bsts::AddTrig(ss, y=ts.training, period=period, frequencies=1)
+    bsts.fit <- try(bsts::bsts(bsts.form, state.specification=ss, niter=1000),
+                    silent=F)
+    fcst <- predict(bsts.fit, horizon=len.fcst, burn=200,
+                    quantiles=c(pred.level2, 1-pred.level2), newdata=x.future)
+
+  } else {
+    ss <- bsts::AddStudentLocalLinearTrend(list(), y=ts.training)
+    ss <- bsts::AddSeasonal(ss, y=ts.training, nseasons=period)
+    bsts.fit <- try(bsts::bsts(ts.training, state.specification=ss, niter=1000),
+                    silent=T)
+    fcst <- predict(bsts.fit, horizon=len.fcst, burn=200,
+                    quantiles=c(pred.level2, 1-pred.level2))
+  }
+
+
+  fcst.lower <- fcst$interval[1,]
+  fcst.upper <- fcst$interval[2,]
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst$median,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+
+  fcst.df <- .BackTransformForecast(fcst.df, transform=transform,
+                                    box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Function to get a consensus forecast from an ensemble of forecasts
+#'
+#' @param forecast.list: list of forecast dataframes (need to contain fields for
+#'   date, forecast, forecast.lower, foreast.upper)
+#' @param consensus.method: function to apply to ensemble of forecasts
+#'  (pointwise)
+#' @return: a dataframe containing the consensus forecast
+GetConsensusForecast <- function(forecast.list, consensus.method) {
+
+  if (length(forecast.list) == 1) return(forecast.list[[1]])
+  fcst.length <- length(forecast.list[[1]]$date)
+  num.fcsts <- length(forecast.list)
+  fcst.mat <- fcst.upper.mat <- fcst.lower.mat <-
+      matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
+
+  for (i in 1:num.fcsts) {
+    fcst.mat[, i] <- forecast.list[[i]]$forecast
+    fcst.upper.mat[, i] <- forecast.list[[i]]$forecast.upper
+    fcst.lower.mat[, i] <- forecast.list[[i]]$forecast.lower
+  }
+  consensus.fun <- get(consensus.method)
+  fcst.consensus <- apply(fcst.mat, 1, consensus.fun, na.rm=T)
+  fcst.upper.consensus <- apply(fcst.upper.mat, 1, consensus.fun, na.rm=T)
+  fcst.lower.consensus <- apply(fcst.lower.mat, 1, consensus.fun, na.rm=T)
+
+  consensus.forecast <- data.frame(date=forecast.list[[1]]$date,
+                                   forecast=fcst.consensus,
+                                   forecast.lower=fcst.lower.consensus,
+                                   forecast.upper=fcst.upper.consensus)
+  return(consensus.forecast)
+}
+

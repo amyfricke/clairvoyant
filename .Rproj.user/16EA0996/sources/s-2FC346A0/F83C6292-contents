@@ -1,0 +1,420 @@
+
+#' Helper (internal) function to Aggregate a single week of history
+#'
+#' @param idx: index of the history to aggregate the prior week over
+#' @param history: dataframe of the daily history with date and actual fields
+#' @param cols.agg: vector of column names to aggregate
+#' @return: one row data frame with aggregated history
+#' @noRd
+.AggOneWeek <- function(idx, history, cols.agg=c('actual', 'actual.lower',
+                                                 'actual.upper')) {
+  aggr <- colSums(history[cols.agg][(idx - 6):idx,])
+  aggr <- as.data.frame(t(aggr))
+  aggr$date <- history$date[idx]
+  aggr <- aggr[, c(ncol(aggr), 1:length(cols.agg))]
+
+  return(aggr)
+}
+
+#' Function to Aggregate to the weekly buckets using one weekday as the
+#'  week ending date
+#'
+#' @param history: Data frame for the daily history. The required fields are
+#'     date and target.
+#' @param weekend.day: Integer value to specify which DOW should conclude a week
+#' @param cols.agg: vector of columns to aggregate
+#' @return: weekly.history: Data frame for weekly history
+AggregateToWeekly <- function(daily.history,
+                              cols.agg=c('actual', 'actual.lower',
+                                         'actual.upper'),
+                              train.end.wday=
+                              as.POSIXlt(max(daily.history$date))$wday) {
+  d <- as.POSIXlt(daily.history$date)
+  filter <- which(d$wday == train.end.wday)
+  filter <- filter[filter > 6]
+
+  weekly.history.tmp <- sapply(filter, .AggOneWeek, history=daily.history,
+                               cols.agg=cols.agg)
+  weekly.history.tmp <- data.frame(t(weekly.history.tmp))
+  weekly.history <- data.frame(date = as.Date(unlist(weekly.history.tmp$date),
+                                              origin="1970-01-01"))
+  for (i in 1:length(cols.agg)) {
+    weekly.history[cols.agg[i]] <-
+        as.numeric(unlist(weekly.history.tmp[cols.agg[i]]))
+  }
+
+  return(weekly.history)
+}
+
+#' Function to find a Box Cox transformation on a series with trend and
+#'  (possibly) seasonality
+#'
+#' @param history dataframe of dates and actuals to find a Box Cox transform for
+#' @param seasonality boolean indicating if seasonality should be applied
+#' @param period integer giving the length of the seasonal periods
+#' @return The paramater controlling the Box Cox transformation found
+GetBoxCoxTransform <- function(history, seasonality=FALSE,
+                               period=52) {
+  # Find the Box Cox transformation for a time series
+  history$date.idx <- c(1:nrow(history))
+  if (seasonality && period > 1) {
+    history$season.idx <- as.factor(history$date.idx %% period)
+    bxcx <- MASS::boxcox(actual ~ date.idx + season.idx,
+                         lambda=seq(0, 1, by=.1), plotit=F, data=history)
+  } else {
+    bxcx <- MASS::boxcox(actual ~ date.idx, lambda=seq(0, 1, by=.1),
+                         plotit=F, data=history)
+  }
+  box.cox.lambda <- bxcx$x[which.max(bxcx$y)]
+  return(box.cox.lambda)
+}
+
+#' Function to aggregate and transform a smoothed weekly time series
+#'
+#' @param history: smoothed history to transform acutals columns
+#' @param cols.transform: columns to transform
+#' @param transform: transformation to apply
+#' @param period: seasonality period
+#' @return transformed + aggregated data frame and aggregated dataframe
+#' @noRd
+.AggregateAndTransformSmoothed <- function(history,
+                                           cols.transform=c('actual',
+                                                            'actual.lower',
+                                                            'actual.upper'),
+                                           transform='Box_Cox',
+                                           period=52) {
+
+  aggregated <- AggregateToWeekly(history, cols.transform)
+  agg.list <- list()
+  agg.list$aggregated <- aggregated
+  aggregated.transformed <- aggregated
+
+  if (transform == 'Box_Cox') {
+    box.cox.lambda <- GetBoxCoxTransform(aggregated, seasonality=TRUE,
+                                         period=period)
+  } else {
+    box.cox.lambda <- 1
+  }
+  agg.list$box.cox.lambda <- box.cox.lambda
+  for (i in 1:length(cols.transform)) {
+    aggregated.transformed[cols.transform[i]] <-
+        .TransformTimeSeries(aggregated[cols.transform[i]],
+                             transform=transform,
+                             box.cox.lambda=box.cox.lambda)
+  }
+  agg.list$aggregated.transformed <- aggregated.transformed
+  return(agg.list)
+}
+
+#' Function to back transform a smoothed weekly forecast
+#'
+#' @param history: smoothed history to transform acutals columns
+#' @param cols.transform: columns to transform
+#' @param transform: transformation to apply
+#' @param box.cox.lambda: box cox parameter for transformation
+#' @return transformed data frame
+#' @noRd
+.BackTransformWeeklyForecast <- function(forecast.transformed,
+                                         cols.transform=c('forecast',
+                                                          'forecast.lower',
+                                                          'forecast.upper'),
+                                           transform='Box_Cox',
+                                           box.cox.lambda=1) {
+   forecast.backtransformed <- forecast.transformed
+   for (i in 1:length(cols.transform)) {
+     forecast.backtransformed[cols.transform[i]] <-
+         .BackTransformTimeSeries(forecast.transformed[cols.transform[i]],
+                                  transform=transform,
+                                  box.cox.lambda=box.cox.lambda)
+     }
+  return(list(forecast=forecast.backtransformed))
+}
+
+
+#' Option for forecasting weekly totals (long term or short term). Finds the
+#'  optimal arima forecast
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in weeks)
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+AutoArima <- function(history, fcst.dates, period=52, pred.level=0.8,
+                      transform='Box_Cox', box.cox.lambda=1) {
+
+  fcst.dates.seq <- seq((fcst.dates$begin.date + 6), fcst.dates$end.date, by=7)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+  arima.fit <- suppressWarnings(forecast::auto.arima(ts.training))
+  arima.order <- forecast::arimaorder(arima.fit)
+
+  pdq.order <- arima.order[1:3]
+  if (length(arima.order) > 5) {
+    seasonal.order <- list(order=arima.order[4:6], period=period)
+  } else if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  fcst <- predict(arima(ts.training, order=pdq.order,
+                        seasonal=seasonal.order), len.fcst)$pred
+
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.lower.pred <- predict(arima.fit.lower, len.fcst)
+  fcst.lower <-
+      fcst.lower.pred$pred -
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+  arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.upper.pred <- predict(arima.fit.upper, len.fcst)
+  fcst.upper <-
+      fcst.upper.pred$pred +
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformWeeklyForecast(fcst.df, transform=transform,
+                                          box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting weekly totals (long term or short term). Finds the
+#'  arima forecast with order (0, 2, 1) for the order
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in weeks)
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Arima021 <- function(history, fcst.dates, period=52, pred.level=0.8,
+                     transform='Box_Cox', box.cox.lambda=1) {
+
+  fcst.dates.seq <- seq((fcst.dates$begin.date + 6), fcst.dates$end.date, by=7)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+
+  pdq.order <- c(0, 2, 1)
+  if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  fcst <- predict(arima(ts.training, order=pdq.order,
+                        seasonal=seasonal.order), len.fcst)$pred
+
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.lower.pred <- predict(arima.fit.lower, len.fcst)
+  fcst.lower <-
+      fcst.lower.pred$pred -
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+  arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.upper.pred <- predict(arima.fit.upper, len.fcst)
+  fcst.upper <-
+      fcst.upper.pred$pred +
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformWeeklyForecast(fcst.df, transform=transform,
+                                          box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting weekly totals (long term or short term). Finds the
+#'  arima forecast with order (0, 1, 3) for the order
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in weeks)
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Arima012 <- function(history, fcst.dates, period=52, pred.level=0.8,
+                     transform='Box_Cox', box.cox.lambda=1) {
+
+  fcst.dates.seq <- seq((fcst.dates$begin.date + 6), fcst.dates$end.date, by=7)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+
+  pdq.order <- c(0, 1, 2)
+  if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  fcst <- predict(arima(ts.training, order=pdq.order,
+                        seasonal=seasonal.order), len.fcst)$pred
+
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.lower.pred <- predict(arima.fit.lower, len.fcst)
+  fcst.lower <-
+      fcst.lower.pred$pred -
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+  arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.upper.pred <- predict(arima.fit.upper, len.fcst)
+  fcst.upper <-
+      fcst.upper.pred$pred +
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformWeeklyForecast(fcst.df, transform=transform,
+                                          box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting weekly totals (long term or short term). Finds the
+#'  arima forecast with order (0, 1, 3) for the order
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in weeks)
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+Arima011 <- function(history, fcst.dates, period=52, pred.level=0.8,
+                     transform='Box_Cox', box.cox.lambda=1) {
+
+  fcst.dates.seq <- seq((fcst.dates$begin.date + 6), fcst.dates$end.date, by=7)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+
+  pdq.order <- c(0, 1, 1)
+  if (period > 1) {
+    seasonal.order <- list(order=c(0, 1, 1), period=period)
+  } else {
+    seasonal.order <- c(0, 0, 0)
+  }
+  fcst <- predict(arima(ts.training, order=pdq.order,
+                        seasonal=seasonal.order), len.fcst)$pred
+
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.lower.pred <- predict(arima.fit.lower, len.fcst)
+  fcst.lower <-
+      fcst.lower.pred$pred -
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
+
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+  arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
+                           seasonal=seasonal.order)
+  fcst.upper.pred <- predict(arima.fit.upper, len.fcst)
+  fcst.upper <-
+      fcst.upper.pred$pred +
+          qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformWeeklyForecast(fcst.df, transform=transform,
+                                          box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Option for forecasting weekly totals (long term or short term). Finds the
+#'  Holt Winters forecast
+#'
+#' @param history: dataframe containing fields for date, actual, actual.lower,
+#'   actual.upper for forecasting
+#' @param fcst.dates: named vector containing start and end date of forecast
+#' @param period: length of seasonal period (in weeks)
+#' @param pred.level: level for the prediction intervals
+#' @return: dataframe containing the date, forecast, forecast lower prediction
+#'   limit and upper prediction limit
+HWinters <- function(history, fcst.dates, period=52, pred.level=0.8,
+                     transform='Box_Cox', box.cox.lambda=1) {
+
+  fcst.dates.seq <- seq((fcst.dates$begin.date + 6), fcst.dates$end.date, by=7)
+  len.fcst <- length(fcst.dates.seq)
+
+  ts.training <- ts(history$actual, frequency=period)
+
+  seasonality <- (period > 1)
+  seasonal <- 'add'
+  fcst <- predict(HoltWinters(ts.training,
+                              seasonal=seasonal), len.fcst, seasonality,
+                  level=pred.level)[, 1]
+
+  ts.training.lower <- ts(history$actual.lower, frequency=period)
+  hw.fit.lower <- HoltWinters(ts.training.lower, gamma=seasonality,
+                              seasonal=seasonal)
+  fcst.lower <- predict(hw.fit.lower, len.fcst, T, level=pred.level)[, 3]
+
+  ts.training.upper <- ts(history$actual.upper, frequency=period)
+  hw.fit.upper <- HoltWinters(ts.training.upper, gamma=seasonality,
+                              seasonal=seasonal)
+  fcst.upper <- predict(hw.fit.upper, len.fcst, T, level=pred.level)[, 2]
+
+  fcst.df <- data.frame(date=fcst.dates.seq, forecast=fcst,
+                        forecast.lower=fcst.lower,
+                        forecast.upper=fcst.upper)
+  fcst.df <- .BackTransformWeeklyForecast(fcst.df, transform=transform,
+                                          box.cox.lambda=box.cox.lambda)
+  return(fcst.df)
+
+}
+
+#' Function to get a consensus forecast from an ensemble of forecasts
+#'
+#' @param forecast.list: list of forecast dataframes (need to contain fields for
+#'   date, forecast, forecast.lower, foreast.upper)
+#' @param consensus.method: function to apply to ensemble of forecasts
+#'  (pointwise)
+#' @return: a dataframe containing the consensus forecast
+GetConsensusForecast <- function(forecast.list, consensus.method) {
+
+  if (length(forecast.list) == 1) return(forecast.list[[1]])
+  fcst.length <- length(forecast.list[[1]]$date)
+  num.fcsts <- length(forecast.list)
+  fcst.mat <- fcst.upper.mat <- fcst.lower.mat <-
+      matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
+
+  for (i in 1:num.fcsts) {
+    fcst.mat[, i] <- forecast.list[[i]]$forecast
+    fcst.upper.mat[, i] <- forecast.list[[i]]$forecast.upper
+    fcst.lower.mat[, i] <- forecast.list[[i]]$forecast.lower
+  }
+  consensus.fun <- get(consensus.method)
+  fcst.consensus <- apply(fcst.mat, 1, consensus.fun, na.rm=T)
+  fcst.upper.consensus <- apply(fcst.upper.mat, 1, consensus.fun, na.rm=T)
+  fcst.lower.consensus <- apply(fcst.lower.mat, 1, consensus.fun, na.rm=T)
+
+  consensus.forecast <- data.frame(date=forecast.list[[1]]$date,
+                                   forecast=fcst.consensus,
+                                   forecast.lower=fcst.lower.consensus,
+                                   forecast.upper=fcst.upper.consensus)
+  return(consensus.forecast)
+}
+

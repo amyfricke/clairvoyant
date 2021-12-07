@@ -1,0 +1,24 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1580110770341.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "1929909730",
+    "id" : "87C9B8A1",
+    "lastKnownWriteTime" : 1580110697,
+    "last_content_update" : 1580110697,
+    "path" : "~/CrispTakeHome_AmyRichardson/clairvoyant/man/Arima012.Rd",
+    "project_path" : "man/Arima012.Rd",
+    "properties" : {
+    },
+    "read_only" : true,
+    "read_only_alternatives" : [
+        "R/weekly_forecast.R"
+    ],
+    "relative_order" : 10,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_doc"
+}

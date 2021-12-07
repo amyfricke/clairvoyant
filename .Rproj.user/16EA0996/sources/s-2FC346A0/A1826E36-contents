@@ -1,0 +1,16 @@
+pineapple.influx.demand.sample.week <-
+  BackTestOrdering(pineapple.sales,
+                   start.date=as.Date('2019-06-06'),
+                   end.date=as.Date('2019-06-07'),
+                   event.parameters=event.parameters,
+                   disaggregation.parameters=
+                     disaggregation.parameters)
+pineapple.key.metrics.sample.week <-
+  ComputeVolumeAgeRevenue(pineapple.influx.demand.sample.week$lower,
+                          starting.1day=880, starting.2day=0,
+                          starting.3day=200,
+                          demand.ytd=16000, delivered.ytd=15000,
+                          prior.precision.misses=c(0.89),
+                          good.grace.freq=1)
+
+suppressWarnings(PlotPrecisionAndVolumeByAge(pineapple.key.metrics.sample.week))
