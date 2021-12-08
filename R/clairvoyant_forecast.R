@@ -46,10 +46,10 @@ Clairvoyant <- function(history,
   if (is.null(training.end.dt)) {
     training.end.dt <- max(history$dt)
   }
-
+  
   training.end.dt <- dt_format(training.end.dt)
-
-
+  
+  
   # Subset the history to dates that yield an integer number of the largest
   # aggregated buckets for forecasting if desired
   periods.agg <- aggregation.parameters$periods.agg
@@ -61,7 +61,7 @@ Clairvoyant <- function(history,
   }
   forecast.end.dt <- dt_format(forecast.end.dt)
   do.aggregation <- (length(periods.agg) > 0 &&
-                     max(periods.agg) > 1)
+                       max(periods.agg) > 1)
   aggregate.to.longest <- aggregation.parameters$aggregate.to.longest
   train.dts <- .GetBeginEndDts(first.dt, training.end.dt,
                                dt.units=dt.units,
@@ -70,16 +70,23 @@ Clairvoyant <- function(history,
                                need.integer.period=do.aggregation,
                                period=max(periods.agg))
   fcst.dts <- .GetBeginEndDts((train.dts$end.dt + dt_units(1)),
-                               forecast.end.dt,
-                               dt.units=dt.units,
-                               dt.format=dt.format,
-                               fix.dt.option="end.later",
-                               need.integer.period=do.aggregation,
-                               period=max(periods.agg))
-
+                              forecast.end.dt,
+                              dt.units=dt.units,
+                              dt.format=dt.format,
+                              fix.dt.option="end.later",
+                              need.integer.period=do.aggregation,
+                              period=max(periods.agg))
+  
   training <- list(unaggregated=list())
   forecast <- list()
-
+  
+  if (!is.null(ensemble.parameters$x.features)) {
+    ensemble.parameters$x.features$dt <-
+      dt_format(ensemble.parameters$x.features$dt)
+    ensemble.parameters$x.features <-
+      ensemble.parameters$x.features[order(ensemble.parameters$x.features$dt), ]
+  }
+  
   if (!is.null(ensemble.parameters$x.features) &&
       (min(ensemble.parameters$x.features$dt) <= train.dts$begin.dt) &&
       (max(ensemble.parameters$x.features$dt) >= fcst.dts$end.dt)) {
@@ -90,8 +97,8 @@ Clairvoyant <- function(history,
     forecast$x.features <- list()
     forecast$x.features$unaggregated <-
       subset(ensemble.parameters$x.features, dt >= fcst.dts$begin.dt &
-             dt <= fcst.dts$end.dt)
-
+               dt <= fcst.dts$end.dt)
+    
   } else if (is.null(ensemble.parameters$x.features)) {
     training$x.features$unaggregated <-
       forecast$x.features$unaggregated <- NULL
@@ -99,7 +106,7 @@ Clairvoyant <- function(history,
     stop(paste('x.features must cover both the training and forecast period',
                'and must contain a column for dt'))
   }
-  # Fill missing datetimes+ analyze missingness and impute if directed to
+  # Fill missing datetimes + analyze missingness and impute if directed to
   filled.imputed.ob <-
     FillAnalyzeImpute(subset(history, dt >= train.dts$begin.dt
                              & dt <= train.dts$end.dt),
@@ -107,7 +114,7 @@ Clairvoyant <- function(history,
                       dt.units,
                       dt.format,
                       training$x.features$unaggregated)
-
+  
   training$unaggregated$raw <- filled.imputed.ob$filled
   if (imputation.parameters$impute.missing) {
     training$unaggregated$imputed <- filled.imputed.ob$imputed
@@ -116,11 +123,11 @@ Clairvoyant <- function(history,
   if (imputation.parameters$analyze.missing) {
     training$missingness.analysis <- filled.imputed.ob$missingness.analysis
   }
-
+  
   # Aggregate the data to weekly to eliminate one level of seasonality
   # then transform the data using the specified transformation (Box cox finds
   # the transformation that stabilizes the variance the best
-
+  
   agg.transform.ob <-
     .AggregateAndTransform(training$unaggregated[[transform.tag]],
                            periods.agg=periods.agg,
@@ -128,13 +135,13 @@ Clairvoyant <- function(history,
                            periods=periods,
                            dt.format=dt.format,
                            transform=ensemble.parameters$transform)
-
+  
   training$transformed <- list(df=agg.transform.ob$transformed,
                                transform=ensemble.parameters$transform,
                                box.cox.lambda=agg.transform.ob$box.cox.lambda)
-
+  
   training$aggregated <- agg.transform.ob$aggregated
-
+  
   if (!is.null(ensemble.parameters$x.features)) {
     x.cols <- colnames(ensemble.parameters$x.features)
     x.cols <- x.cols[x.cols != 'dt']
@@ -149,7 +156,7 @@ Clairvoyant <- function(history,
       training$x.features$aggregated <- agg.x.ob
       x.reg <- subset(training$x.features$aggregated[[paste(max(periods.agg))]],
                       select=-c(dt))
-
+  
       agg.x.ob <-
         AggregateToLongest(forecast$x.features$unaggregated,
                            cols.agg=x.cols,
@@ -157,11 +164,11 @@ Clairvoyant <- function(history,
                            dt.format=dt.format,
                            agg.fun=aggregation.parameters$agg.fun)
       forecast$x.features$aggregated <- agg.x.ob
-
+      
       x.future <-
         subset(forecast$x.features$aggregated[[paste(max(periods.agg))]],
                select=-c(dt))
-
+      
     } else {
       x.reg <- subset(training$x.features$unaggregated,
                       select=-c(dt))
@@ -171,7 +178,7 @@ Clairvoyant <- function(history,
   } else {
     x.reg <- x.future <- NULL
   }
-
+  
   # check that there is enough history to fit each seasonal period and remove
   # if not enough
   periods <- agg.transform.ob$periods
@@ -184,7 +191,7 @@ Clairvoyant <- function(history,
                 "removed due to lack of sufficient history.\n"))
     }
   }
-
+  
   # Fit an ensemble of models to the (imputed, aggregated) transformed data
   forecast$periods <- periods
   forecast$ensemble <- list()
@@ -195,32 +202,32 @@ Clairvoyant <- function(history,
   for (i in 1:length(models)) {
     ForecastMethod <- get(models[i])
     forecast.ob <- try(
-          ForecastMethod(history=training$transformed$df,
-                         fcst.dts=fcst.dts,
-                         dt.units=dt.units, dt.format=dt.format,
-                         periods=periods, periods.agg=periods.agg,
-                         periods.trig=
-                           ensemble.parameters$periods.trig / agg.bucket,
-                         pred.level=ensemble.parameters$pred.level,
-                         transform=ensemble.parameters$transform,
-                         box.cox.lambda=training$transformed$box.cox.lambda,
-                         x.reg=x.reg,
-                         x.future=x.future,
-                         holidays.df=ensemble.parameters$holidays.df),
-        silent=!verbose)
+      ForecastMethod(history=training$transformed$df,
+                     fcst.dts=fcst.dts,
+                     dt.units=dt.units, dt.format=dt.format,
+                     periods=periods, periods.agg=periods.agg,
+                     periods.trig=
+                       ensemble.parameters$periods.trig / agg.bucket,
+                     pred.level=ensemble.parameters$pred.level,
+                     transform=ensemble.parameters$transform,
+                     box.cox.lambda=training$transformed$box.cox.lambda,
+                     x.reg=x.reg,
+                     x.future=x.future,
+                     holidays.df=ensemble.parameters$holidays.df),
+      silent=!verbose)
     if (all(class(forecast.ob) != 'try-error')) {
       forecast$ensemble[[models[i]]] <- forecast.ob$forecast
       forecast$ensemble.trans[[models[i]]] <- forecast.ob$trans.forecast
       forecast$ensemble.summary[[models[i]]] <- forecast.ob$model.summary
-
+      
     }
   }
-
+  
   # Get the consensus forecast using the specified method
   forecast$consensus <-
     GetConsensusForecast(forecast$ensemble,
                          ensemble.parameters$consensus.method)
-
+  
   range.methods <- ensemble.parameters$range.methods
   range <-
     GetForecastRange(forecast$ensemble.trans, lower.method=range.methods[1],
@@ -230,13 +237,13 @@ Clairvoyant <- function(history,
                      box.cox.lambda=training$transformed$box.cox.lambda)
   range$range.se.lower <- range$range.se.upper <- range$c.alpha <- NULL
   forecast$consensus <- merge(forecast$consensus, range, by='dt')
-
+  
   # Disaggregate the forecast back into unaggregated numbers using multinomial
   #  regression if the training data fed to the ensemble was aggregated
-
+  
   if (aggregation.parameters$aggregate.to.longest &&
       (length(periods.agg) > 0)) {
-
+    
     periods.disagg <- periods.agg[periods.agg != max(periods.agg)]
     periods.disagg <- periods.disagg[order(periods.disagg, decreasing=TRUE)]
     periods.disaggr <- c(periods.disagg, 1)
@@ -244,14 +251,14 @@ Clairvoyant <- function(history,
       periods.disaggr
     periods.agg.r <- periods.agg[order(periods.agg, decreasing=TRUE)]
     periods.aggr <- c(max(periods), periods.disagg)
-
+    
     disaggregate.format <- aggregation.parameters$disaggregate.format
     disaggregate.format <- disaggregate.format[order(periods.aggr,
                                                      decreasing=TRUE)]
     forecast$disaggregated <- list()
     forecast.aggregated <- forecast$consensus
     for (i in 1:length(periods.disaggr)) {
-
+      
       if (periods.disaggr[i] == 1) {
         unaggregated.history <- training$unaggregated[[transform.tag]]
       } else {
@@ -260,7 +267,7 @@ Clairvoyant <- function(history,
       }
       aggregated.history <-
         training$aggregated[[paste0(periods.agg.r[i])]]
-
+      
       forecast$disaggregated[[paste0(periods.disaggr[i])]] <-
         DisaggregateForecast(unaggregated.history,
                              aggregated.history,
@@ -276,9 +283,9 @@ Clairvoyant <- function(history,
       forecast.aggregated <-
         forecast$disaggregated[[paste0(periods.disaggr[i])]]
     }
-
+    
     forecast$final <- forecast$disaggregated[['1']]
-
+    
     forecast$aggregated <- list()
     forecast$aggregated$final <-
       AggregateToLongest(forecast$final,
@@ -292,14 +299,14 @@ Clairvoyant <- function(history,
                          periods.agg=periods.agg,
                          dt.format=dt.format,
                          agg.fun=aggregation.parameters$agg.fun)
-
-
+    
+    
   } else {
     forecast$aggregated <- list(final=NULL)
     forecast$final <-forecast$consensus
-
+    
   }
-
+  
   # If there are data not used in training (after the train.end.dt) use this
   # to do out of sample evaluation of the forecasted values
   evaluation <- EvaluateClairvoyant(history, forecast$final,
@@ -313,7 +320,7 @@ Clairvoyant <- function(history,
                                     longest.period=max(periods.agg) * period,
                                     get.unagg.pred.int=
                                       aggregation.parameters$get.pred.int)
-
+  
   # Do separate evaluation for each model in the ensemble
   evaluation$ensemble <- list()
   models <- names(forecast$ensemble)
@@ -329,13 +336,13 @@ Clairvoyant <- function(history,
     }
     evaluation.model.i <-
       EvaluateClairvoyant(history, final.forecast,
-                         aggregation.parameters=aggregation.parameters,
-                         aggregated.histories=training$aggregated,
-                         aggregated.forecasts=aggregated.forecast,
-                         dt.format=dt.format,
-                         longest.period=max(periods.agg) * period,
-                         get.unagg.pred.int=
-                           aggregation.parameters$get.pred.int)
+                          aggregation.parameters=aggregation.parameters,
+                          aggregated.histories=training$aggregated,
+                          aggregated.forecasts=aggregated.forecast,
+                          dt.format=dt.format,
+                          longest.period=max(periods.agg) * period,
+                          get.unagg.pred.int=
+                            aggregation.parameters$get.pred.int)
     if (length(periods.agg) > 0 && max(periods.agg) > 1) {
       evaluation$ensemble[[models[i]]] <-
         evaluation.model.i$aggregated[[paste(max(periods.agg))]]
@@ -343,11 +350,10 @@ Clairvoyant <- function(history,
       evaluation$ensemble[[models[i]]] <- evaluation.model.i$unaggregated
     }
   }
-
+  
   return(list(training=training,
               forecast=forecast,
               evaluation=evaluation))
-
+  
 }
-
 
