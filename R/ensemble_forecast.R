@@ -27,48 +27,49 @@ EnsembleParameters <- function(transform='none',
                                range.methods=c('LowerQuartile', 'UpperQuartile'),
                                pred.level=0.8) {
   ensemble.parameters <- list()
-
+  
   stopifnot(tolower(transform) %in% c('log', 'box_cox', 'none'))
   ensemble.parameters$transform <- tolower(transform)
-
-
-  stopifnot(all(round(periods.trig) - periods.trig == 0))
+  
+  
+  stopifnot(is.null(periods.trig) ||
+              all(round(periods.trig) - periods.trig == 0))
   ensemble.parameters$periods.trig <- periods.trig
-
+  
   stopifnot(all(round(periods) - periods == 0))
   # Remove any doubly specified periods (keep them in
   #  periods trig because those are easier to fit models for)
   periods <- periods[!(periods %in% periods.trig)]
   ensemble.parameters$periods <- periods
-
+  
   stopifnot(class(models) == 'character')
   ensemble.parameters$models <- models
-
+  
   #stopifnot(round(n.models.keep) - n.models.keep == 0)
   #ensemble.parameters$n.models.keep <- n.models.keep
-
+  
   stopifnot(is.null(x.features) || any(class(x.features) %in%
-                                    c('data.frame', 'matrix')))
-  ensemble.parameters$x.features <- x.features
-
-  stopifnot(is.null(holidays.df) || any(class(holidays.df) %in%
                                          c('data.frame', 'matrix')))
+  ensemble.parameters$x.features <- x.features
+  
+  stopifnot(is.null(holidays.df) || any(class(holidays.df) %in%
+                                          c('data.frame', 'matrix')))
   ensemble.parameters$holidays.df <- holidays.df
-
+  
   stopifnot(consensus.method %in% c('median', 'mean', 'LowerQuartile',
                                     'UpperQuartile'))
   ensemble.parameters$consensus.method <- consensus.method
-
+  
   stopifnot(length(range.methods) == 2 &&
-            all(range.methods %in% c('min', 'max',
-                                     'LowerQuartile', 'UpperQuartile',
-                                     'median', 'mean')))
+              all(range.methods %in% c('min', 'max',
+                                       'LowerQuartile', 'UpperQuartile',
+                                       'median', 'mean')))
   ensemble.parameters$range.methods <- range.methods
-
+  
   stopifnot(pred.level >= 0 && pred.level <= 1)
   ensemble.parameters$pred.level <- pred.level
-
-
+  
+  
   return(ensemble.parameters)
 }
 
@@ -105,13 +106,13 @@ EnsembleParameters <- function(transform='none',
                       periods=c(7), periods.agg=NULL, periods.trig=c(364),
                       pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                       x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   fcst.interval <- max(c(1, periods.agg))
   dt_units <- get(dt.units)
   fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
                       fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
   len.fcst <- length(fcst.dts.seq)
-
+  
   if (length(periods) > 0) {
     periods <- periods[periods > 1]
   }
@@ -119,19 +120,19 @@ EnsembleParameters <- function(transform='none',
   ts.training <- ts(history$actual, frequency=period.ts)
   ts.training.lower <- ts(history$actual.lower, frequency=period.ts)
   ts.training.upper <- ts(history$actual.upper, frequency=period.ts)
-
-
+  
+  
   if (any(periods > 1) && !is.null(periods)) {
     seasonal.order <- list(order=c(0, 1, 1), period=min(periods))
   } else {
     seasonal.order <- c(0, 0, 0)
   }
-
+  
   if ((!is.null(x.reg) && !is.null(x.future)) ||
       (!is.null(holidays.df)) || (length(periods.trig) > 0)) {
-
+    
     if (!is.null(holidays.df)) {
-
+      
       holidays.matrix <- GetHolidayFeatures(history.start=
                                               (min(history$dt) -
                                                  dt_units(fcst.interval - 1)),
@@ -147,10 +148,10 @@ EnsembleParameters <- function(transform='none',
         x.reg <- holidays.matrix$holidays.past
         x.future <- holidays.matrix$holidays.future
       }
-
+      
     }
-
-    if (length(periods.trig) > 0) {
+    
+    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
       trig.matrix <- GetTrigSeasonalityFeatures(nrow(history), len.fcst,
                                                 periods.trig)
       if (!is.null(x.reg) && !is.null(x.future)) {
@@ -161,13 +162,13 @@ EnsembleParameters <- function(transform='none',
         x.future <- trig.matrix$trig.seasonality.future
       }
     }
-
+    
     x.reg <- as.matrix(x.reg)
     x.future <- as.matrix(x.future)
     arima.fit <- arima(ts.training, order=pdq.order, xreg=x.reg,
                        seasonal=seasonal.order)
     fcst <- predict(arima.fit, len.fcst, newxreg=x.future, se.fit=TRUE)
-
+    
     arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
                              seasonal=seasonal.order, xreg=x.reg)
     fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
@@ -178,7 +179,7 @@ EnsembleParameters <- function(transform='none',
     arima.fit <- arima(ts.training, order=pdq.order, xreg=x.reg,
                        seasonal=seasonal.order)
     fcst <- predict(arima.fit, len.fcst, newxreg=x.future, se.fit=TRUE)
-
+    
     arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
                              seasonal=seasonal.order, xreg=x.reg)
     fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
@@ -189,11 +190,11 @@ EnsembleParameters <- function(transform='none',
   fcst.lower <-
     fcst.lower.pred$pred -
     qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
-
+  
   fcst.upper <-
     fcst.upper.pred$pred +
     qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
-
+  
   fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$pred,
                         forecast.lower=fcst.lower,
                         forecast.upper=fcst.upper,
@@ -202,14 +203,14 @@ EnsembleParameters <- function(transform='none',
   fitted.df <- data.frame(dt=history$dt,
                           predicted=history$actual - arima.fit$residuals,
                           residuals=arima.fit$residuals)
-
+  
   fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
                                           box.cox.lambda=box.cox.lambda)
   fcst.bcktrans$forecast$se <- NULL
-
+  
   return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
               model.summary=model.summary, fitted=fitted.df))
-
+  
 }
 
 
@@ -248,11 +249,11 @@ Arima011 <- function(history, fcst.dts,
   rslt <- .Arimapdq(c(0, 1, 1), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 
@@ -288,15 +289,15 @@ Arima012 <- function(history, fcst.dts,
                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   rslt <- .Arimapdq(c(0, 1, 2), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 
@@ -332,15 +333,15 @@ Arima111 <- function(history, fcst.dts,
                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   rslt <- .Arimapdq(c(1, 1, 1), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long or short term)
@@ -375,15 +376,15 @@ Arima112 <- function(history, fcst.dts,
                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   rslt <- .Arimapdq(c(1, 1, 2), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long or short term)
@@ -418,15 +419,15 @@ Arima013 <- function(history, fcst.dts,
                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   rslt <- .Arimapdq(c(0, 1, 3), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long or short term)
@@ -461,15 +462,15 @@ Arima113 <- function(history, fcst.dts,
                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   rslt <- .Arimapdq(c(1, 1, 3), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long or short term)
@@ -504,15 +505,15 @@ Arima211 <- function(history, fcst.dts,
                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   rslt <- .Arimapdq(c(2, 1, 1), history, fcst.dts, dt.units, dt.format,
                     periods, periods.agg, periods.trig, pred.level,
                     transform, box.cox.lambda, x.reg, x.future, holidays.df)
-
-
+  
+  
   return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
               model.summary=rslt$model.summary, fitted=rslt$fitted))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long or short term)
@@ -546,24 +547,24 @@ AutoArima <- function(history, fcst.dts,
                       periods=c(7), periods.agg=NULL, periods.trig=c(364),
                       pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                       x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   fcst.interval <- max(c(1, periods.agg))
   dt_units <- get(dt.units)
   fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
                       fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
   len.fcst <- length(fcst.dts.seq)
-
+  
   if (length(periods) > 0) {
     periods <- periods[periods > 1]
   }
   period.ts <- ifelse(length(periods) > 0, min(periods), 1)
   ts.training <- ts(history$actual, frequency=period.ts)
-
+  
   if ((!is.null(x.reg) && !is.null(x.future)) ||
       (!is.null(holidays.df)) || (length(periods.trig) > 0)) {
-
+    
     if (!is.null(holidays.df)) {
-
+      
       holidays.matrix <- GetHolidayFeatures(history.start=
                                               (min(history$dt) -
                                                  dt_units(fcst.interval - 1)),
@@ -579,13 +580,13 @@ AutoArima <- function(history, fcst.dts,
         x.reg <- holidays.matrix$holidays.past
         x.future <- holidays.matrix$holidays.future
       }
-
+      
     }
-
-    if (length(periods.trig) > 0) {
+    
+    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
       trig.matrix <- GetTrigSeasonalityFeatures(nrow(history), len.fcst,
                                                 periods.trig)
-
+      
       if (!is.null(x.reg) && !is.null(x.future)) {
         x.reg <- cbind(x.reg, trig.matrix$trig.seasonality.past)
         x.future <- cbind(x.future, trig.matrix$trig.seasonality.future)
@@ -593,44 +594,44 @@ AutoArima <- function(history, fcst.dts,
         x.reg <- trig.matrix$trig.seasonality.past
         x.future <-trig.matrix$trig.seasonality.future
       }
-
+      
     }
-
+    
     autoarima.fit <- suppressWarnings(
       forecast::auto.arima(ts.training, biasadj=T, max.D=1, max.P=1, max.Q=1,
                            max.p=3, max.q=3, parallel=TRUE,
                            xreg=as.matrix(x.reg)))
-
+    
     fcst <- forecast::forecast(autoarima.fit, h=len.fcst, level=pred.level,
                                xreg=as.matrix(x.future))
   } else {
     autoarima.fit <- suppressWarnings(
       forecast::auto.arima(ts.training, biasadj=T, max.D=1, max.P=1, max.Q=1,
                            max.p=3, max.q=3, parallel=TRUE))
-
+    
     fcst <- forecast::forecast(autoarima.fit, h=len.fcst, level=pred.level)
-
+    
   }
-
+  
   fcst.se <- (as.vector(fcst$upper) - as.vector(fcst$lower)) /
     qnorm(0.5 + pred.level / 2)
   fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$mean,
                         forecast.lower=as.vector(fcst$lower),
                         forecast.upper=as.vector(fcst$upper),
                         se=fcst.se)
-
+  
   model.summary <- summary(fcst)$model
   fitted.df <- data.frame(dt=history$dt, predicted=fcst$fitted,
                           residuals=fcst$residuals)
-
+  
   fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
                                           box.cox.lambda=box.cox.lambda)
-
+  
   fcst.bcktrans$forecast$se <- NULL
-
+  
   return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
               model.summary=model.summary, fitted=fitted.df))
-
+  
 }
 
 
@@ -664,27 +665,27 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                  periods=c(7), periods.agg=NULL, periods.trig=c(364),
                  pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                  x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   set.seed(54321)
   fcst.interval <- max(c(1, periods.agg))
   dt_units <- get(dt.units)
   fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
                       fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
   len.fcst <- length(fcst.dts.seq)
-
+  
   ts.training <- ts(history$actual, frequency=max(periods))
   pred.level2 <- (1 - pred.level) / 2
-
-  if (length(periods.trig) > 0) {
+  
+  if (length(periods.trig) > 0 && max(periods.trig) > 1) {
     freqs <- max(periods.trig) / periods.trig
   }
-
-
+  
+  
   if ((!is.null(x.reg) && !is.null(x.future)) ||
       (!is.null(holidays.df))) {
-
+    
     if (!is.null(holidays.df)) {
-
+      
       holidays.matrix <- GetHolidayFeatures(history.start=
                                               (min(history$dt) -
                                                  dt_units(fcst.interval - 1)),
@@ -695,9 +696,9 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                                             holidays.df=holidays.df)
       x.reg <- cbind(x.reg, holidays.matrix$holidays.past)
       x.future <- cbind(x.future, holidays.matrix$holidays.future)
-
+      
     }
-
+    
     for (xcol in colnames(x.reg)) {
       assign(xcol, x.reg[[xcol]])
     }
@@ -706,20 +707,20 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
     ss <- bsts::AddDynamicRegression(list(), bsts.form)
     ss <- bsts::AddSemilocalLinearTrend(ss, y=ts.training)
     bsts.regressors <- c('intercept', colnames(x.reg), 'trend.ar')
-    if (length(periods.trig) > 0) {
+    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
       ss <- bsts::AddTrig(ss, y=ts.training, period=max(periods.trig),
                           frequencies=freqs)
       bsts.regressors <- c(bsts.regressors, paste0('trig.', max(periods.trig)))
     }
-
-
+    
+    
     if (length(periods) > 0 && max(periods) > 1) {
       ss <- bsts::AddSeasonal(ss, y=ts.training,
                               nseasons=min(periods[periods > 1]))
       bsts.regressors <- c(bsts.regressors,
                            paste0('seasonal.', min(periods[periods > 1])))
     }
-
+    
     bsts.fit <- try(bsts::bsts(bsts.form, state.specification=ss, niter=1000),
                     silent=F)
     fcst <- predict(bsts.fit, horizon=len.fcst, burn=200,
@@ -728,16 +729,16 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                     mean(bsts.fit$trend.slope.ar.coefficient))
     bsts.sd <- c(apply(bsts.fit$coefficients, 2, sd),
                  sd(bsts.fit$trend.slope.ar.coefficient))
-
+    
   } else {
     ss <- bsts::AddSemilocalLinearTrend(list(), y=ts.training)
     bsts.regressors <- c('trend.ar')
-    if (length(periods.trig) > 0) {
+    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
       ss <- bsts::AddTrig(ss, y=ts.training, period=max(periods.trig),
                           frequencies=freqs)
       bsts.regressors <- c(bsts.regressors, paste0('trig.', max(periods.trig)))
     }
-
+    
     if (length(periods) > 0 && max(periods) > 1) {
       ss <- bsts::AddSeasonal(ss, y=ts.training, nseasons=periods)
       bsts.regressors <- c(bsts.regressors,
@@ -749,9 +750,9 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                     quantiles=c(pred.level2, 1-pred.level2))
     bsts.coefs <- c(mean(bsts.fit$trend.slope.ar.coefficient))
     bsts.sd <- c(sd(bsts.fit$trend.slope.ar.coefficient))
-
+    
   }
-
+  
   if (length(periods.trig) > 0 && max(periods.trig) > 1) {
     bsts.coefs <- c(bsts.coefs, NA)
     bsts.sd <- c(bsts.sd, mean(bsts.fit[[paste0('trig.coefficient.sd.',
@@ -763,8 +764,8 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
     bsts.sd <- c(bsts.sd, sqrt(mean(bsts.fit[[paste0('sigma.seasonal.',
                                                      min.periods.g1)]])))
   }
-
-
+  
+  
   fcst.lower <- fcst$interval[1,]
   fcst.upper <- fcst$interval[2,]
   fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$median,
@@ -775,21 +776,21 @@ Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                               coef=bsts.coefs,
                               sd=bsts.sd)
   model.summary$log.likelihood <- bsts.fit$log.likelihood[1000]
-
+  
   bsts.residuals <-
     colMeans(bsts::bsts.prediction.errors(bsts.fit, burn=200)$in.sample)
   fitted.df <- data.frame(dt=history$dt,
                           predicted=history$actual - bsts.residuals,
                           residuals=bsts.residuals)
-
+  
   fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
                                           box.cox.lambda=box.cox.lambda)
-
+  
   fcst.bcktrans$forecast$se <- NULL
-
+  
   return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
               model.summary=model.summary, fitted=fitted.df))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long or short term).
@@ -822,21 +823,21 @@ Nnetar <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                    periods=c(7), periods.agg=NULL, periods.trig=c(364),
                    pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                    x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   fcst.interval <- max(c(1, periods.agg))
   dt_units <- get(dt.units)
   fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
                       fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
   len.fcst <- length(fcst.dts.seq)
-
+  
   ts.training <- ts(history$actual, frequency=max(periods))
   if ((!is.null(x.reg) && !is.null(x.future)) ||
       (!is.null(holidays.df)) || (length(periods.trig) > 0)) {
-
+    
     if (!is.null(holidays.df)) {
-
+      
       if (!is.null(holidays.df)) {
-
+        
         holidays.matrix <- GetHolidayFeatures(history.start=
                                                 (min(history$dt) -
                                                    dt_units(fcst.interval - 1)),
@@ -852,13 +853,13 @@ Nnetar <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
           x.reg <- holidays.matrix$holidays.past
           x.future <- holidays.matrix$holidays.future
         }
-
+        
       }
-
-      if (length(periods.trig) > 0) {
+      
+      if (length(periods.trig) > 0 && max(periods.trig) > 1) {
         trig.matrix <- GetTrigSeasonalityFeatures(nrow(history), len.fcst,
                                                   periods.trig)
-
+        
         if (!is.null(x.reg) && !is.null(x.future)) {
           x.reg <- cbind(x.reg, trig.matrix$trig.seasonality.past)
           x.future <- cbind(x.future, trig.matrix$trig.seasonality.future)
@@ -869,12 +870,12 @@ Nnetar <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
       }
     }
     nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training, xreg=x.reg))
-
+    
     fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
                                level=pred.level, xreg=x.future)
   } else {
     nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training))
-
+    
     fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
                                level=pred.level)
   }
@@ -883,19 +884,19 @@ Nnetar <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
                         forecast.upper=as.vector(fcst$upper))
   fcst.df$se <- (fcst.df$forecast.upper - fcst.df$forecast.lower) /
     (qnorm(0.5 + pred.level / 2))
-
+  
   model.summary <- NULL
   fitted.df <- data.frame(dt=history$dt,
                           predicted=nnetar.fit$fitted,
                           residuals=history$actual - nnetar.fit$fitted)
-
+  
   fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
                                           box.cox.lambda=box.cox.lambda)
   fcst.bcktrans$forecast$se <- NULL
-
+  
   return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
               model.summary=model.summary, fitted=fitted.df))
-
+  
 }
 
 
@@ -930,20 +931,20 @@ ProphetLinear <- function(history, fcst.dts,
                           periods=c(7), periods.agg=NULL, periods.trig=c(364),
                           pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                           x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   fcst.interval <- max(c(1, periods.agg))
   dt_units <- get(dt.units)
   fcst.by <-
     ifelse(fcst.interval==1, substr(dt.units, 1, (nchar(dt.units) - 1)),
            paste(fcst.interval, dt.units))
   fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                       fcst.dts$end.dt, by=fcst.by)
+                      fcst.dts$end.dt, by=fcst.by)
   len.fcst <- length(fcst.dts.seq)
-
+  
   all.periods <- fcst.interval * c(1, periods, periods.trig)
-
+  
   colnames(history) <- c('ds', 'y', 'y.lower', 'y.upper')
-
+  
   if (!is.null(holidays.df)) {
     holidays.df <- holidays.df[c('dt', 'holiday')]
     colnames(holidays.df) <- c('ds', 'holiday')
@@ -951,15 +952,15 @@ ProphetLinear <- function(history, fcst.dts,
   prophet.m <- prophet::prophet(history, fit=F,
                                 interval.width=pred.level,
                                 yearly.seasonality=(any(all.periods %in%
-                                                    c(364, 365))),
+                                                          c(364, 365))),
                                 holidays=holidays.df,
-                                #mcmc.samples=1000,
+                                mcmc.samples=1000,
                                 changepoint.prior.scale=0.01)
-
+  
   p.fcst.df <- data.frame(ds=fcst.dts.seq)
   periods.st <- c(1, 7, 364, 365, 24)
   periods.g <- fcst.interval * c(periods, periods.trig)
-
+  
   if (!(all(periods.g %in% periods.st))) {
     for (period.ns in periods.g[!(periods.g %in% periods.st)]) {
       prophet.m <-
@@ -969,8 +970,8 @@ ProphetLinear <- function(history, fcst.dts,
                                  fourier.order=2)
     }
   }
-
-
+  
+  
   if (!is.null(x.reg) && !is.null(x.future)) {
     for (x.reg.name in names(x.reg)){
       history[paste0('x.reg.', x.reg.name)] <- x.reg[x.reg.name]
@@ -979,23 +980,23 @@ ProphetLinear <- function(history, fcst.dts,
       p.fcst.df[paste0('x.reg.', x.reg.name)] <-
         x.future[x.reg.name]
     }
-
+    
   }
   prophet.f <- prophet::fit.prophet(prophet.m, history)
   p.fcst.df <- predict(prophet.f, p.fcst.df)
-
+  
   fcst.df <- data.frame(dt=fcst.dts.seq, forecast=p.fcst.df$yhat,
                         forecast.lower=p.fcst.df$yhat_lower,
                         forecast.upper=p.fcst.df$yhat_upper,
                         se=(p.fcst.df$yhat_upper-p.fcst.df$yhat_lower)/
                           (qnorm(0.5 + pred.level / 2)))
-
+  
   if (!is.null(x.reg) && !is.null(x.future)) {
     model.summary <- regressor_coefficients(prophet.f)
   } else {
     model.summary <- NULL
   }
-
+  
   model.summary <- rbind(model.summary,
                          data.frame(regressor=c('trend'),
                                     regressor_mode=c('additive'),
@@ -1007,22 +1008,22 @@ ProphetLinear <- function(history, fcst.dts,
                                     coef_upper=p.fcst.df$trend_upper[2]-
                                       p.fcst.df$trend_upper[1]))
   model.summary$se <- ((model.summary$coef_upper - model.summary$coef_lower) /
-                       (qnorm(0.5 + pred.level / 2)))
-
+                         (qnorm(0.5 + pred.level / 2)))
+  
   prophet.fitted <- predict(prophet.f, history)
-
+  
   fitted.df <- data.frame(dt=history$ds,
                           predicted=prophet.fitted$yhat,
                           residuals=history$y - prophet.fitted$yhat)
-
+  
   fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
                                           box.cox.lambda=box.cox.lambda)
-
+  
   fcst.bcktrans$forecast$se <- NULL
-
+  
   return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
               model.summary=model.summary, fitted=fitted.df))
-
+  
 }
 
 #' Option for forecasting (aggregated or disaggregated, long term or short
@@ -1056,17 +1057,17 @@ ProphetLogistic <- function(history, fcst.dts,
                             periods=c(7), periods.agg=NULL, periods.trig=c(364),
                             pred.level=0.8, transform='box_cox', box.cox.lambda=1,
                             x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-
+  
   fcst.interval <- max(c(1, periods.agg))
   dt_units <- get(dt.units)
   fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
                       fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
   len.fcst <- length(fcst.dts.seq)
-
+  
   colnames(history) <- c('ds', 'y', 'y.lower', 'y.upper')
   # TODO: change this to a manipulable parameter
   history$cap <- 10 * history$y
-
+  
   if (!is.null(holidays.df)) {
     holidays.df <- holidays.df[c('dt', 'holiday')]
     colnames(holidays.df) <- c('ds', 'holiday')
@@ -1075,16 +1076,16 @@ ProphetLogistic <- function(history, fcst.dts,
   prophet.m <- prophet::prophet(history, fit=F,
                                 interval.width=pred.level,
                                 yearly.seasonality=(any(all.periods %in%
-                                                    c(364, 365))),
+                                                          c(364, 365))),
                                 holidays=holidays.df,
                                 #mcmc.samples=1000,
                                 changepoint.prior.scale=0.01)
-
+  
   p.fcst.df <- data.frame(ds=fcst.dts.seq, cap=max(history$cap))
-
+  
   periods.st <- c(1, 7, 364, 365, 24)
   periods.g <- fcst.interval * c(periods, periods.trig)
-
+  
   if (!(all(periods.g %in% periods.st))) {
     for (period.ns in periods.g[!(periods.g %in% periods.st)]) {
       prophet.m <-
@@ -1094,7 +1095,7 @@ ProphetLogistic <- function(history, fcst.dts,
                                  fourier.order=2)
     }
   }
-
+  
   if (!is.null(x.reg) && !is.null(x.future)) {
     for (x.reg.name in names(x.reg)){
       history[paste0('x.reg.', x.reg.name)] <- x.reg[x.reg.name]
@@ -1103,20 +1104,19 @@ ProphetLogistic <- function(history, fcst.dts,
       p.fcst.df[paste0('x.reg.', x.reg.name)] <-
         x.future[x.reg.name]
     }
-
+    
   }
   prophet.f <- prophet::fit.prophet(prophet.m, history)
   p.fcst.df <- predict(prophet.f, p.fcst.df)
-
+  
   fcst.df <- data.frame(dt=fcst.dts.seq, forecast=p.fcst.df$yhat,
                         forecast.lower=p.fcst.df$yhat_lower,
                         forecast.upper=p.fcst.df$yhat_upper,
                         se=(p.fcst.df$yhat_upper-p.fcst.df$yhat_lower)/
                           (qnorm(0.5 + pred.level / 2)))
-
+  
   if (!is.null(x.reg) && !is.null(x.future)) {
     model.summary <- regressor_coefficients(prophet.f)
-    print(model.summary)
   } else {
     model.summary <- NULL
   }
@@ -1132,21 +1132,21 @@ ProphetLogistic <- function(history, fcst.dts,
                                       p.fcst.df$trend_upper[1]))
   model.summary$se <- ((model.summary$coef_upper - model.summary$coef_lower) /
                          (qnorm(0.5 + pred.level / 2)))
-
+  
   prophet.fitted <- predict(prophet.f, history)
-
+  
   fitted.df <- data.frame(dt=history$ds,
                           predicted=prophet.fitted$yhat,
                           residuals=history$y - prophet.fitted$yhat)
-
+  
   fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
                                           box.cox.lambda=box.cox.lambda)
-
+  
   fcst.bcktrans$forecast$se <- NULL
-
+  
   return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
               model.summary=model.summary, fitted=fitted.df))
-
+  
 }
 
 
@@ -1160,13 +1160,13 @@ ProphetLogistic <- function(history, fcst.dts,
 #' @return: a dataframe containing the consensus forecast
 #' @export
 GetConsensusForecast <- function(forecast.list, consensus.method='median') {
-
+  
   if (length(forecast.list) == 1) return(forecast.list[[1]])
   fcst.length <- length(forecast.list[[1]]$dt)
   num.fcsts <- length(forecast.list)
   fcst.mat <- fcst.upper.mat <- fcst.lower.mat <-
-      matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
-
+    matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
+  
   for (i in 1:num.fcsts) {
     fcst.mat[, i] <- forecast.list[[i]]$forecast
     fcst.upper.mat[, i] <- forecast.list[[i]]$forecast.upper
@@ -1176,7 +1176,7 @@ GetConsensusForecast <- function(forecast.list, consensus.method='median') {
   fcst.consensus <- apply(fcst.mat, 1, consensus_fun, na.rm=T)
   fcst.upper.consensus <- apply(fcst.upper.mat, 1, consensus_fun, na.rm=T)
   fcst.lower.consensus <- apply(fcst.lower.mat, 1, consensus_fun, na.rm=T)
-
+  
   consensus.forecast <- data.frame(dt=forecast.list[[1]]$dt,
                                    forecast=fcst.consensus,
                                    forecast.lower=fcst.lower.consensus,
@@ -1215,17 +1215,17 @@ GetForecastRange <- function(forecast.list,
                              lower.method='min', upper.method='max',
                              pred.level=0.8, transform='none',
                              box.cox.lambda=1) {
-
+  
   cols.transf <- c("range.forecast.lower", "range.forecast.upper",
                    "range.uncertainty.lower", "range.uncertainty.upper")
-
+  
   if (length(forecast.list) == 1) {
     forecast.range <- data.frame(dt=forecast.list[[1]]$dt)
     forecast.range$range.forecast.lower <- forecast.list[[1]]$forecast
     forecast.range$range.forecast.upper <- forecast.list[[1]]$forecast
     forecast.range$range.uncertainty.lower <- forecast.list[[1]]$forecast.lower
     forecast.range$range.uncertainty.upper <- forecast.list[[1]]$forecast.upper
-
+    
     forecast.range <-
       .BackTransformForecast(forecast.range, cols.transform=cols.transf,
                              transform=transform,
@@ -1236,20 +1236,20 @@ GetForecastRange <- function(forecast.list,
   num.fcsts <- length(forecast.list)
   fcst.mat <- fcst.se.mat <-
     matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
-
+  
   for (i in 1:num.fcsts) {
     fcst.mat[, i] <- forecast.list[[i]]$forecast
     fcst.se.mat[, i] <- forecast.list[[i]]$se
   }
-
+  
   lower_fun <- get(lower.method)
   upper_fun <- get(upper.method)
   range.fcst.lower <- apply(fcst.mat, 1, lower_fun, na.rm=T)
   range.fcst.upper <- apply(fcst.mat, 1, upper_fun, na.rm=T)
-
+  
   fcst.se.lower <- apply(as.matrix(range.fcst.lower, ncol=1), 1,
                          .MatchSe, fcst.se.mat, fcst.mat)
-
+  
   fcst.se.upper <- apply(as.matrix(range.fcst.upper, ncol=1), 1,
                          .MatchSe, fcst.se.mat, fcst.mat)
   forecast.range <- data.frame(dt=forecast.list[[1]]$dt,
@@ -1257,24 +1257,22 @@ GetForecastRange <- function(forecast.list,
                                range.forecast.upper=range.fcst.upper,
                                range.se.lower=fcst.se.lower,
                                range.se.upper=fcst.se.upper)
-
+  
   c.alphas <- apply(forecast.range, 1, GetAdjustedAlpha, alpha=(1-pred.level))
   c.alphas <- as.vector(unlist(c.alphas))
-
+  
   forecast.range$range.uncertainty.lower <-
     (forecast.range$range.forecast.lower -
-     c.alphas * forecast.range$range.se.lower)
+       c.alphas * forecast.range$range.se.lower)
   forecast.range$range.uncertainty.upper <-
     (forecast.range$range.forecast.upper +
-     c.alphas * forecast.range$range.se.upper)
-
+       c.alphas * forecast.range$range.se.upper)
+  
   forecast.range <-
     .BackTransformForecast(forecast.range, cols.transform=cols.transf,
                            transform=transform, box.cox.lambda=box.cox.lambda)
   forecast.range <- forecast.range$forecast
   forecast.range$c.alpha <- c.alphas
-
+  
   return(forecast.range)
 }
-
-
