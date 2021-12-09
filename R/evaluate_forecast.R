@@ -63,1217 +63,550 @@ EnsembleParameters <- function(transform='none',
   
   stopifnot(length(range.methods) == 2 &&
               all(range.methods %in% c('min', 'max',
-                                       'LowerQuartile', 'UpperQuartile',
-                                       'median', 'mean')))
-  ensemble.parameters$range.methods <- range.methods
-  
-  stopifnot(pred.level >= 0 && pred.level <= 1)
-  ensemble.parameters$pred.level <- pred.level
-  
-  
-  return(ensemble.parameters)
-}
-
-
-#'  Function to generate arima forecast model with order (p, d, q)
-#'  (and optionally, seasonal order 0,1,1)
+#' Function to get forecast error for the final daily and weekly forecasts and
+#'  booleans of whether the prediction interval covers the actual value
 #'
-#' @param pdq.order vector containing the autoregressive order, degree of
-#'  differencing and the moving average order (ordered in this manner)
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-.Arimapdq <- function(pdq.order=c(1, 1, 1), history, fcst.dts,
-                      dt.units='days', dt.format='.AsPOSIXlt',
-                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  fcst.interval <- max(c(1, periods.agg))
-  dt_units <- get(dt.units)
-  fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                      fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
-  len.fcst <- length(fcst.dts.seq)
-  
-  if (length(periods) > 0) {
-    periods <- periods[periods > 1]
-  }
-  period.ts <- ifelse(length(periods) > 0, min(periods), 1)
-  ts.training <- ts(history$actual, frequency=period.ts)
-  ts.training.lower <- ts(history$actual.lower, frequency=period.ts)
-  ts.training.upper <- ts(history$actual.upper, frequency=period.ts)
-  
-  
-  if (any(periods > 1) && !is.null(periods)) {
-    seasonal.order <- list(order=c(0, 1, 1), period=min(periods))
-  } else {
-    seasonal.order <- c(0, 0, 0)
-  }
-  
-  if ((!is.null(x.reg) && !is.null(x.future)) ||
-      (!is.null(holidays.df)) || (length(periods.trig) > 0)) {
-    
-    if (!is.null(holidays.df)) {
-      
-      holidays.matrix <- GetHolidayFeatures(history.start=
-                                              (min(history$dt) -
-                                                 dt_units(fcst.interval - 1)),
-                                            fcst.dts=fcst.dts,
-                                            dt.units=dt.units,
-                                            dt.format=dt.format,
-                                            periods.agg=periods.agg,
-                                            holidays.df=holidays.df)
-      if (!is.null(x.reg) && !is.null(x.future)) {
-        x.reg <- cbind(x.reg, holidays.matrix$holidays.past)
-        x.future <- cbind(x.future, holidays.matrix$holidays.future)
-      } else {
-        x.reg <- holidays.matrix$holidays.past
-        x.future <- holidays.matrix$holidays.future
+#' @param daily.history: the full daily history (including dates that may be in
+#'   the forecast
+#' @param daily.forecast: the final daily forecast
+#' @param weekly.forecast: the final weekly forecast
+#' @param get.daily.pred.int: boolean indicating if there are daily prediction
+#'   intervals to be evaluated
+#' @return: list of dataframes containing forecast evaluation data
+#' @export
+EvaluateClairvoyant <- function(unaggregated.history, unaggregated.forecast,
+                                aggregation.parameters=NULL,
+                                aggregated.histories=NULL,
+                                aggregated.forecasts=NULL,
+                                dt.format='.AsPOSIXlt',
+                                longest.period=364,
+                                get.unagg.pred.int=TRUE) {
+
+  unaggregated.eval <- subset(unaggregated.history,
+                              dt %in% unaggregated.forecast$dt)
+
+  periods.agg <- aggregation.parameters$periods.agg
+  agg.fun <- aggregation.parameters$agg.fun
+
+  if (nrow(unaggregated.eval) < min(periods.agg)) return(NULL)
+
+  unaggregated.eval$test <- 1
+
+  if (!is.null(aggregated.histories) && !is.null(aggregated.forecasts)) {
+    n.agg <- floor(nrow(unaggregated.eval) / max(periods.agg)) * max(periods.agg)
+    aggregated.evals <-
+        AggregateToLongest(unaggregated.eval[1:n.agg,],
+                           periods.agg=periods.agg,
+                           agg.fun=agg.fun,
+                           cols.agg=c("actual", "test"),
+                           dt.format=dt.format)
+    stopifnot(all(aggregated.evals[paste(max(periods.agg))]$test ==
+                    max(periods.agg)))
+
+    for (i in 1:length(aggregated.evals)) {
+
+      aggregated.evals[[i]]$test <- NULL
+      aggregated.evals[[i]] <- merge(aggregated.evals[[i]],
+                                     aggregated.forecasts[[i]], by=c('dt'))
+      aggregated.evals[[i]]$error <-
+       ((aggregated.evals[[i]]$forecast - aggregated.evals[[i]]$actual) /
+        aggregated.evals[[i]]$actual)
+
+      aggregated.evals[[i]]$abs.error <- abs(aggregated.evals[[i]]$error)
+      aggregated.evals[[i]]$prediction.interval.coverage <-
+        (aggregated.evals[[i]]$actual >= aggregated.evals[[i]]$forecast.lower &
+         aggregated.evals[[i]]$actual <= aggregated.evals[[i]]$forecast.upper)
+
+      if (!is.null(aggregated.evals[[i]]$range.forecast.lower)) {
+
+        aggregated.evals[[i]]$range.forecast.coverage <-
+          (aggregated.evals[[i]]$actual >=
+           aggregated.evals[[i]]$range.forecast.lower &
+           aggregated.evals[[i]]$actual <=
+           aggregated.evals[[i]]$range.forecast.upper)
+
+        aggregated.evals[[i]]$range.uncertainty.coverage <-
+          (aggregated.evals[[i]]$actual >=
+           aggregated.evals[[i]]$range.uncertainty.lower &
+            aggregated.evals[[i]]$actual <=
+           aggregated.evals[[i]]$range.uncertainty.upper)
       }
-      
+
     }
-    
-    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-      trig.matrix <- GetTrigSeasonalityFeatures(nrow(history), len.fcst,
-                                                periods.trig)
-      if (!is.null(x.reg) && !is.null(x.future)) {
-        x.reg <- cbind(x.reg, trig.matrix$trig.seasonality.past)
-        x.future <- cbind(x.future, trig.matrix$trig.seasonality.future)
-      } else {
-        x.reg <- trig.matrix$trig.seasonality.past
-        x.future <- trig.matrix$trig.seasonality.future
-      }
-    }
-    
-    x.reg <- as.matrix(x.reg)
-    x.future <- as.matrix(x.future)
-    arima.fit <- arima(ts.training, order=pdq.order, xreg=x.reg,
-                       seasonal=seasonal.order)
-    fcst <- predict(arima.fit, len.fcst, newxreg=x.future, se.fit=TRUE)
-    
-    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
-                             seasonal=seasonal.order, xreg=x.reg)
-    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
-    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
-                             seasonal=seasonal.order, xreg=x.reg)
-    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
   } else {
-    arima.fit <- arima(ts.training, order=pdq.order, xreg=x.reg,
-                       seasonal=seasonal.order)
-    fcst <- predict(arima.fit, len.fcst, newxreg=x.future, se.fit=TRUE)
-    
-    arima.fit.lower <- arima(ts.training.lower, order=pdq.order,
-                             seasonal=seasonal.order, xreg=x.reg)
-    fcst.lower.pred <- predict(arima.fit.lower, len.fcst, newxreg=x.future)
-    arima.fit.upper <- arima(ts.training.upper, order=pdq.order,
-                             seasonal=seasonal.order, xreg=x.reg)
-    fcst.upper.pred <- predict(arima.fit.upper, len.fcst, newxreg=x.future)
+    aggregated.evals <- NULL
   }
-  fcst.lower <-
-    fcst.lower.pred$pred -
-    qnorm(1 - ((1 - pred.level) / 2)) * fcst.lower.pred$se
-  
-  fcst.upper <-
-    fcst.upper.pred$pred +
-    qnorm(1 - ((1 - pred.level) / 2)) * fcst.upper.pred$se
-  
-  fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$pred,
-                        forecast.lower=fcst.lower,
-                        forecast.upper=fcst.upper,
-                        se=fcst$se)
-  model.summary <- summary(arima.fit)
-  fitted.df <- data.frame(dt=history$dt,
-                          predicted=history$actual - arima.fit$residuals,
-                          residuals=arima.fit$residuals)
-  
-  fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
-                                          box.cox.lambda=box.cox.lambda)
-  fcst.bcktrans$forecast$se <- NULL
-  
-  return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
-              model.summary=model.summary, fitted=fitted.df))
-  
-}
 
+  unaggregated.eval$test <- NULL
+  unaggregated.eval <- merge(unaggregated.eval,
+                             unaggregated.forecast, by=c("dt"))
+  unaggregated.eval$error <-
+      ((unaggregated.eval$forecast - unaggregated.eval$actual) /
+       unaggregated.eval$actual)
+  unaggregated.eval$abs.error <- abs(unaggregated.eval$error)
 
-#'  Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (0, 1, 1) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima011 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  rslt <- .Arimapdq(c(0, 1, 1), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
+    unaggregated.eval$prediction.interval.coverage <-
+      (unaggregated.eval$actual >= unaggregated.eval$forecast.lower &
+       unaggregated.eval$actual <= unaggregated.eval$forecast.upper)
+  if (!is.null(unaggregated.eval$range.forecast.lower)) {
+    unaggregated.eval$range.forecast.coverage <-
+      (unaggregated.eval$actual >=
+       unaggregated.eval$range.forecast.lower &
+       unaggregated.eval$actual <= unaggregated.eval$range.forecast.upper)
 
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (0, 1, 2) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima012 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  rslt <- .Arimapdq(c(0, 1, 2), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
-
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (1, 1, 1) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima111 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  rslt <- .Arimapdq(c(1, 1, 1), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (1, 1, 2) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima112 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  rslt <- .Arimapdq(c(1, 1, 2), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (0, 1, 3) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima013 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  rslt <- .Arimapdq(c(0, 1, 3), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (1, 1, 3) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima113 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  rslt <- .Arimapdq(c(1, 1, 3), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the arima forecast with order (2, 1, 1) (and optionally, seasonal
-#'  order 0,1,1)
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-Arima211 <- function(history, fcst.dts,
-                     dt.units='days', dt.format='.AsPOSIXlt',
-                     periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                     pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                     x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  rslt <- .Arimapdq(c(2, 1, 1), history, fcst.dts, dt.units, dt.format,
-                    periods, periods.agg, periods.trig, pred.level,
-                    transform, box.cox.lambda, x.reg, x.future, holidays.df)
-  
-  
-  return(list(forecast=rslt$forecast, trans.forecast=rslt$trans.forecast,
-              model.summary=rslt$model.summary, fitted=rslt$fitted))
-  
-}
-
-#' Option for forecasting (aggregated or disaggregated, long or short term)
-#'  Finds the optimal arima forecast
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-AutoArima <- function(history, fcst.dts,
-                      dt.units='days', dt.format='.AsPOSIXlt',
-                      periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                      pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                      x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  fcst.interval <- max(c(1, periods.agg))
-  dt_units <- get(dt.units)
-  fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                      fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
-  len.fcst <- length(fcst.dts.seq)
-  
-  if (length(periods) > 0) {
-    periods <- periods[periods > 1]
+    unaggregated.eval$range.uncertainty.coverage <-
+      (unaggregated.eval$actual >=
+       unaggregated.eval$range.uncertainty.lower &
+       unaggregated.eval$actual <= unaggregated.eval$range.uncertainty.upper)
   }
-  period.ts <- ifelse(length(periods) > 0, min(periods), 1)
-  ts.training <- ts(history$actual, frequency=period.ts)
-  
-  if ((!is.null(x.reg) && !is.null(x.future)) ||
-      (!is.null(holidays.df)) || (length(periods.trig) > 0)) {
-    
-    if (!is.null(holidays.df)) {
-      
-      holidays.matrix <- GetHolidayFeatures(history.start=
-                                              (min(history$dt) -
-                                                 dt_units(fcst.interval - 1)),
-                                            fcst.dts=fcst.dts,
-                                            dt.units=dt.units,
-                                            dt.format=dt.format,
-                                            periods.agg=periods.agg,
-                                            holidays.df=holidays.df)
-      if (!is.null(x.reg) && !is.null(x.future)) {
-        x.reg <- cbind(x.reg, holidays.matrix$holidays.past)
-        x.future <- cbind(x.future, holidays.matrix$holidays.future)
-      } else {
-        x.reg <- holidays.matrix$holidays.past
-        x.future <- holidays.matrix$holidays.future
-      }
-      
-    }
-    
-    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-      trig.matrix <- GetTrigSeasonalityFeatures(nrow(history), len.fcst,
-                                                periods.trig)
-      
-      if (!is.null(x.reg) && !is.null(x.future)) {
-        x.reg <- cbind(x.reg, trig.matrix$trig.seasonality.past)
-        x.future <- cbind(x.future, trig.matrix$trig.seasonality.future)
-      } else {
-        x.reg <- trig.matrix$trig.seasonality.past
-        x.future <-trig.matrix$trig.seasonality.future
-      }
-      
-    }
-    
-    autoarima.fit <- suppressWarnings(
-      forecast::auto.arima(ts.training, biasadj=T, max.D=1, max.P=1, max.Q=1,
-                           max.p=3, max.q=3, parallel=TRUE,
-                           xreg=as.matrix(x.reg)))
-    
-    fcst <- forecast::forecast(autoarima.fit, h=len.fcst, level=pred.level,
-                               xreg=as.matrix(x.future))
+  return(list(unaggregated=unaggregated.eval, aggregated=aggregated.evals))
+}
+
+#' Plot the resulting ensemble of models and the consensus forecast
+#'
+#' @param object: clairvoyant forecast object to plot ensemble
+#' @return: NULL< plot producted
+#' @export
+PlotForecastEnsemble <- function(object, dt.format='as.POSIXct') {
+
+  if (!is.null(object$training$aggregated)) {
+    periods.agg <- as.numeric(names(object$training$aggregated))
+    training <- object$training$aggregated[[paste(max(periods.agg))]]
+
+  } else if (!is.null(object$training$unaggregated$imputed)) {
+    training <- object$training$unaggregated$imputed
   } else {
-    autoarima.fit <- suppressWarnings(
-      forecast::auto.arima(ts.training, biasadj=T, max.D=1, max.P=1, max.Q=1,
-                           max.p=3, max.q=3, parallel=TRUE))
-    
-    fcst <- forecast::forecast(autoarima.fit, h=len.fcst, level=pred.level)
-    
+    training <- object$training$unaggregated$raw
   }
-  
-  fcst.se <- (as.vector(fcst$upper) - as.vector(fcst$lower)) /
-    qnorm(0.5 + pred.level / 2)
-  fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$mean,
-                        forecast.lower=as.vector(fcst$lower),
-                        forecast.upper=as.vector(fcst$upper),
-                        se=fcst.se)
-  
-  model.summary <- summary(fcst)$model
-  fitted.df <- data.frame(dt=history$dt, predicted=fcst$fitted,
-                          residuals=fcst$residuals)
-  
-  fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
-                                          box.cox.lambda=box.cox.lambda)
-  
-  fcst.bcktrans$forecast$se <- NULL
-  
-  return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
-              model.summary=model.summary, fitted=fitted.df))
-  
+  training$type <- 'training'
+  type.levels <- c('training')
+  dt_format <- get(dt.format)
+  all <- training
+  forecast.list <- object$forecast$ensemble
+  forecast.list[['consensus']] <-
+    object$forecast$consensus[c('dt', 'forecast', 'forecast.lower',
+                                'forecast.upper')]
+  for (model in ls(forecast.list)) {
+    model.forecast <- forecast.list[[model]]
+    colnames(model.forecast) <- c('dt', 'actual', 'actual.lower',
+                                  'actual.upper')
+    model.forecast$type <- paste(model, 'forecast')
+    type.levels <- c(type.levels, paste(model, 'forecast'))
+    all <- rbind(all, model.forecast)
+  }
+  all$type <- factor(all$type, levels=type.levels)
+
+  min.year <- as.numeric(substr(min(all$dt), 1, 4))
+  min.year <- min.year + (min(all$dt) >=
+                          dt_format(paste(min.year, "-07-01", sep="")))
+  min.year <- dt_format(paste(min.year, "-01-01", sep=""))
+  max.year <- as.numeric(substr(max(all$dt), 1, 4))
+  max.year <- max.year + (max(all$dt) >=
+                          dt_format(paste(max.year, "-07-01", sep="")))
+  max.year <- dt_format(paste(max.year, "-01-01", sep=""))
+  dtbreaks <- seq(min.year, max.year, by="year")
+  all$line.width <- 1 + (all$type == "consensus")
+  all$dt <- dt_format(all$dt)
+
+  title.name <-
+      "Training and forecast model ensemble"
+  p <- ggplot2::ggplot(data=all, ggplot2::aes(x=dt, y=actual, color=type)) +
+       ggplot2::geom_line(size=all$line.width)
+  p <- p + ggplot2::scale_x_datetime(breaks=dtbreaks,
+                                     labels=scales::date_format("%Y-%m-%d")) +
+      ggplot2::xlab("") + ggplot2::ylab("") +
+      ggplot2::ggtitle(title.name) +
+      ggplot2::theme(axis.text.x=ggplot2::element_text(size=15, face="bold"),
+                     axis.text.y=ggplot2::element_text(size=15, face="bold"),
+                     plot.title=ggplot2::element_text(size=20,
+                                                      vjust=2, face="bold"),
+                     legend.title=ggplot2::element_blank(),
+                     legend.text=ggplot2::element_text(size=12),
+                     legend.background=
+                     ggplot2::element_rect(fill = "transparent"),
+                     legend.position="bottom",
+                     legend.key=ggplot2::element_rect(fill = "transparent"),
+                      legend.key.width=grid::unit(1.5, "cm")) +
+      ggplot2::theme(panel.border=ggplot2::element_blank(),
+                     panel.background=ggplot2::element_blank(),
+                     axis.line=ggplot2::element_line(color="grey"),
+                     panel.grid.major=
+                     ggplot2::element_line(color="#CCCCCC",
+                                           linetype="dashed"),
+                     panel.grid.minor=ggplot2::element_line(color="#DDDDDD",
+                                                            linetype="dashed"))
+  print(p)
 }
 
-
-#' Option for forecasting (aggregated or disaggregated, long term or short
-#' term) using bsts forecast
+#' Plot the resulting ensemble of models and the consensus forecast
 #'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
+#' @param object: clairvoyant forecast object to plot ensemble
+#' @return: NULL< plot producted
 #' @export
-Bsts <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
-                 periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                 pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                 x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  set.seed(54321)
-  fcst.interval <- max(c(1, periods.agg))
-  dt_units <- get(dt.units)
-  fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                      fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
-  len.fcst <- length(fcst.dts.seq)
-  
-  ts.training <- ts(history$actual, frequency=max(periods))
-  pred.level2 <- (1 - pred.level) / 2
-  
-  if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-    freqs <- max(periods.trig) / periods.trig
-  }
-  
-  
-  if ((!is.null(x.reg) && !is.null(x.future)) ||
-      (!is.null(holidays.df))) {
-    
-    if (!is.null(holidays.df)) {
-      
-      holidays.matrix <- GetHolidayFeatures(history.start=
-                                              (min(history$dt) -
-                                                 dt_units(fcst.interval - 1)),
-                                            fcst.dts=fcst.dts,
-                                            dt.units=dt.units,
-                                            dt.format=dt.format,
-                                            periods.agg=periods.agg,
-                                            holidays.df=holidays.df)
-      x.reg <- cbind(x.reg, holidays.matrix$holidays.past)
-      x.future <- cbind(x.future, holidays.matrix$holidays.future)
-      
-    }
-    
-    for (xcol in colnames(x.reg)) {
-      assign(xcol, x.reg[[xcol]])
-    }
-    bsts.form <- paste('ts.training ~', paste(colnames(x.reg), collapse=' + '))
-    bsts.form <- as.formula(bsts.form)
-    ss <- bsts::AddDynamicRegression(list(), bsts.form)
-    ss <- bsts::AddSemilocalLinearTrend(ss, y=ts.training)
-    bsts.regressors <- c('intercept', colnames(x.reg), 'trend.ar')
-    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-      ss <- bsts::AddTrig(ss, y=ts.training, period=max(periods.trig),
-                          frequencies=freqs)
-      bsts.regressors <- c(bsts.regressors, paste0('trig.', max(periods.trig)))
-    }
-    
-    
-    if (length(periods) > 0 && max(periods) > 1) {
-      ss <- bsts::AddSeasonal(ss, y=ts.training,
-                              nseasons=min(periods[periods > 1]))
-      bsts.regressors <- c(bsts.regressors,
-                           paste0('seasonal.', min(periods[periods > 1])))
-    }
-    
-    bsts.fit <- try(bsts::bsts(bsts.form, state.specification=ss, niter=1000),
-                    silent=F)
-    fcst <- predict(bsts.fit, horizon=len.fcst, burn=200,
-                    quantiles=c(pred.level2, 1-pred.level2), newdata=x.future)
-    bsts.coefs <- c(colMeans(bsts.fit$coefficients),
-                    mean(bsts.fit$trend.slope.ar.coefficient))
-    bsts.sd <- c(apply(bsts.fit$coefficients, 2, sd),
-                 sd(bsts.fit$trend.slope.ar.coefficient))
-    
+PlotEnsembleError <- function(object, dt.format='as.POSIXct') {
+
+
+  dt_format <- get(dt.format)
+  error.list <- object$evaluation$ensemble
+  cols.incl <- colnames(error.list[[1]])
+  if (length(object$evaluation$aggregated) > 0) {
+    period.agg <- max(as.numeric(ls(object$evaluation$aggregated)))
+    error.list[['consensus']] <-
+      object$evaluation$aggregated[[paste(period.agg)]][cols.incl]
   } else {
-    ss <- bsts::AddSemilocalLinearTrend(list(), y=ts.training)
-    bsts.regressors <- c('trend.ar')
-    if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-      ss <- bsts::AddTrig(ss, y=ts.training, period=max(periods.trig),
-                          frequencies=freqs)
-      bsts.regressors <- c(bsts.regressors, paste0('trig.', max(periods.trig)))
-    }
-    
-    if (length(periods) > 0 && max(periods) > 1) {
-      ss <- bsts::AddSeasonal(ss, y=ts.training, nseasons=periods)
-      bsts.regressors <- c(bsts.regressors,
-                           paste0('seasonal.', min(periods[periods > 1])))
-    }
-    bsts.fit <- try(bsts::bsts(ts.training, state.specification=ss, niter=1000),
-                    silent=T)
-    fcst <- predict(bsts.fit, horizon=len.fcst, burn=200,
-                    quantiles=c(pred.level2, 1-pred.level2))
-    bsts.coefs <- c(mean(bsts.fit$trend.slope.ar.coefficient))
-    bsts.sd <- c(sd(bsts.fit$trend.slope.ar.coefficient))
-    
+    error.list[['consensus']] <- object$evaluation$unaggregated[cols.incl]
   }
-  
-  if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-    bsts.coefs <- c(bsts.coefs, NA)
-    bsts.sd <- c(bsts.sd, mean(bsts.fit[[paste0('trig.coefficient.sd.',
-                                                max(periods.trig))]]))
+  type.levels <- NULL
+  all <- NULL
+  for (model in ls(error.list)) {
+    model.error <- error.list[[model]]
+    colnames(model.error) <- cols.incl
+    model.error$type <- paste(model, 'error')
+    type.levels <- c(type.levels, paste(model, 'error'))
+    all <- rbind(all, model.error)
   }
-  if (length(periods) > 0 && max(periods) > 1) {
-    min.periods.g1 <- min(periods[periods > 1])
-    bsts.coefs <- c(bsts.coefs, NA)
-    bsts.sd <- c(bsts.sd, sqrt(mean(bsts.fit[[paste0('sigma.seasonal.',
-                                                     min.periods.g1)]])))
-  }
-  
-  
-  fcst.lower <- fcst$interval[1,]
-  fcst.upper <- fcst$interval[2,]
-  fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$median,
-                        forecast.lower=fcst.lower,
-                        forecast.upper=fcst.upper,
-                        se=apply(fcst$distribution, 2, sd) / sqrt(800))
-  model.summary <- data.frame(regressor=bsts.regressors,
-                              coef=bsts.coefs,
-                              sd=bsts.sd)
-  model.summary$log.likelihood <- bsts.fit$log.likelihood[1000]
-  
-  bsts.residuals <-
-    colMeans(bsts::bsts.prediction.errors(bsts.fit, burn=200)$in.sample)
-  fitted.df <- data.frame(dt=history$dt,
-                          predicted=history$actual - bsts.residuals,
-                          residuals=bsts.residuals)
-  
-  fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
-                                          box.cox.lambda=box.cox.lambda)
-  
-  fcst.bcktrans$forecast$se <- NULL
-  
-  return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
-              model.summary=model.summary, fitted=fitted.df))
-  
+  all$type <- factor(all$type, levels=type.levels)
+
+  min.year <- as.numeric(substr(min(all$dt), 1, 4))
+  min.year <- min.year + (min(all$dt) >=
+                            dt_format(paste(min.year, "-07-01", sep="")))
+  min.year <- dt_format(paste(min.year, "-01-01", sep=""))
+  max.year <- as.numeric(substr(max(all$dt), 1, 4))
+  max.year <- max.year + (max(all$dt) >=
+                            dt_format(paste(max.year, "-07-01", sep="")))
+  max.year <- dt_format(paste(max.year, "-01-01", sep=""))
+  dtbreaks <- seq(min.year, max.year, by="year")
+  all$line.width <- 1 + (all$type == "consensus")
+  all$dt <- dt_format(all$dt)
+
+  title.name <-
+    "Training and forecast model ensemble"
+  p <- ggplot2::ggplot(data=all, ggplot2::aes(x=dt, y=error, color=type)) +
+    ggplot2::geom_line(size=all$line.width)
+  p <- p + ggplot2::scale_x_datetime(breaks=dtbreaks,
+                                     labels=scales::date_format("%Y-%m-%d")) +
+    ggplot2::xlab("") + ggplot2::ylab("") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(axis.text.x=ggplot2::element_text(size=15, face="bold"),
+                   axis.text.y=ggplot2::element_text(size=15, face="bold"),
+                   plot.title=ggplot2::element_text(size=20,
+                                                    vjust=2, face="bold"),
+                   legend.title=ggplot2::element_blank(),
+                   legend.text=ggplot2::element_text(size=12),
+                   legend.background=
+                     ggplot2::element_rect(fill = "transparent"),
+                   legend.position="bottom",
+                   legend.key=ggplot2::element_rect(fill = "transparent"),
+                   legend.key.width=grid::unit(1.5, "cm")) +
+    ggplot2::theme(panel.border=ggplot2::element_blank(),
+                   panel.background=ggplot2::element_blank(),
+                   axis.line=ggplot2::element_line(color="grey"),
+                   panel.grid.major=
+                     ggplot2::element_line(color="#CCCCCC",
+                                           linetype="dashed"),
+                   panel.grid.minor=ggplot2::element_line(color="#DDDDDD",
+                                                          linetype="dashed"))
+  print(p)
 }
 
-#' Option for forecasting (aggregated or disaggregated, long or short term).
-#'  Finds a forecast using feed forward neural net autoregressive model
+
+#' Function to plot the training, forecast and actual values
 #'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
+#' @param object: clairvoyant forecast object with steps in process
+#' @param aggregated: whether to plot aggregated forecast
+#' @param freq: frequency forecast should be aggregated to for the plot
+#' @param plot.range: whether the range forecast should be plotted
+#' @param short.term: boolean indicating if should be truncated to short term
+#' @param n.history: number of training dts to include in short.term plot
+#' @param n.forecast: number of forecast dts to include in short.term plot
+#' @param freq: frequency of error (weekly aggregate or daily)
+#' @param outl.dir: output directory
+#' @return: none (plot producted)
 #' @export
-Nnetar <- function(history, fcst.dts, dt.units='days', dt.format='.AsPOSIXlt',
-                   periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                   pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                   x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  fcst.interval <- max(c(1, periods.agg))
-  dt_units <- get(dt.units)
-  fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                      fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
-  len.fcst <- length(fcst.dts.seq)
-  
-  ts.training <- ts(history$actual, frequency=max(periods))
-  if ((!is.null(x.reg) && !is.null(x.future)) ||
-      (!is.null(holidays.df)) || (length(periods.trig) > 0)) {
-    
-    if (!is.null(holidays.df)) {
-      
-      if (!is.null(holidays.df)) {
-        
-        holidays.matrix <- GetHolidayFeatures(history.start=
-                                                (min(history$dt) -
-                                                   dt_units(fcst.interval - 1)),
-                                              fcst.dts=fcst.dts,
-                                              dt.units=dt.units,
-                                              dt.format=dt.format,
-                                              periods.agg=periods.agg,
-                                              holidays.df=holidays.df)
-        if (!is.null(x.reg) && !is.null(x.future)) {
-          x.reg <- cbind(x.reg, holidays.matrix$holidays.past)
-          x.future <- cbind(x.future, holidays.matrix$holidays.future)
-        } else {
-          x.reg <- holidays.matrix$holidays.past
-          x.future <- holidays.matrix$holidays.future
-        }
-        
-      }
-      
-      if (length(periods.trig) > 0 && max(periods.trig) > 1) {
-        trig.matrix <- GetTrigSeasonalityFeatures(nrow(history), len.fcst,
-                                                  periods.trig)
-        
-        if (!is.null(x.reg) && !is.null(x.future)) {
-          x.reg <- cbind(x.reg, trig.matrix$trig.seasonality.past)
-          x.future <- cbind(x.future, trig.matrix$trig.seasonality.future)
-        } else {
-          x.reg <- trig.matrix$trig.seasonality.past
-          x.future <-trig.matrix$trig.seasonality.future
-        }
-      }
-    }
-    nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training, xreg=x.reg))
-    
-    fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
-                               level=pred.level, xreg=x.future)
+PlotTrainingActualAndForecast <- function(object,
+                                          aggregated=FALSE,
+                                          freq=7,
+                                          plot.range=TRUE,
+                                          short.term=FALSE,
+                                          dt.format='.AsPOSIXlt',
+                                          dt.units='days',
+                                          n.history=28, n.forecast=14) {
+  if (aggregated) {
+    training <- object$training$aggregated[[paste(freq)]]
+    forecast <- object$forecast$aggregated$final[[paste(freq)]]
+    evaluation <- object$evaluation$aggregated[[paste(freq)]]
   } else {
-    nnetar.fit <- suppressWarnings(forecast::nnetar(ts.training))
-    
-    fcst <- forecast::forecast(nnetar.fit, h=len.fcst, PI=TRUE,
-                               level=pred.level)
+    training <- object$training$unaggregated$raw
+    forecast <- object$forecast$final
+    evaluation <- object$evaluation$unaggregated
   }
-  fcst.df <- data.frame(dt=fcst.dts.seq, forecast=fcst$mean,
-                        forecast.lower=as.vector(fcst$lower),
-                        forecast.upper=as.vector(fcst$upper))
-  fcst.df$se <- (fcst.df$forecast.upper - fcst.df$forecast.lower) /
-    (qnorm(0.5 + pred.level / 2))
-  
-  model.summary <- NULL
-  fitted.df <- data.frame(dt=history$dt,
-                          predicted=nnetar.fit$fitted,
-                          residuals=history$actual - nnetar.fit$fitted)
-  
-  fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
-                                          box.cox.lambda=box.cox.lambda)
-  fcst.bcktrans$forecast$se <- NULL
-  
-  return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
-              model.summary=model.summary, fitted=fitted.df))
-  
-}
-
-
-#' Option for forecasting (aggregated or disaggregated, long term or short
-#' term).  Finds the prophet forecast with linear trend.
-#'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
-#' @export
-ProphetLinear <- function(history, fcst.dts,
-                          dt.units='days', dt.format='.AsPOSIXlt',
-                          periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                          pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                          x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  fcst.interval <- max(c(1, periods.agg))
-  dt_units <- get(dt.units)
-  fcst.by <-
-    ifelse(fcst.interval==1, substr(dt.units, 1, (nchar(dt.units) - 1)),
-           paste(fcst.interval, dt.units))
-  fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                      fcst.dts$end.dt, by=fcst.by)
-  len.fcst <- length(fcst.dts.seq)
-  
-  all.periods <- fcst.interval * c(1, periods, periods.trig)
-  
-  colnames(history) <- c('ds', 'y', 'y.lower', 'y.upper')
-  
-  if (!is.null(holidays.df)) {
-    holidays.df <- holidays.df[c('dt', 'holiday')]
-    colnames(holidays.df) <- c('ds', 'holiday')
+  dt_format <- get(dt.format)
+  colnames(forecast) <- c('dt', 'value', 'value.lower', 'value.upper',
+                          'range.value.lower', 'range.value.upper',
+                          'range.uncertainty.lower', 'range.uncertainty.upper')
+  training$range.value.lower <- NA
+  training$range.value.upper <- NA
+  training$range.uncertainty.lower <- NA
+  training$range.uncertainty.upper <- NA
+  if (is.null(training$actual.lower)) {
+    training$actual.lower <- NA
   }
-  prophet.m <- prophet::prophet(history, fit=F,
-                                interval.width=pred.level,
-                                yearly.seasonality=(any(all.periods %in%
-                                                          c(364, 365))),
-                                holidays=holidays.df,
-                                #mcmc.samples=1000,
-                                changepoint.prior.scale=0.01)
-  
-  p.fcst.df <- data.frame(ds=fcst.dts.seq)
-  periods.st <- c(1, 7, 364, 365, 24)
-  periods.g <- fcst.interval * c(periods, periods.trig)
-  
-  if (!(all(periods.g %in% periods.st))) {
-    for (period.ns in periods.g[!(periods.g %in% periods.st)]) {
-      prophet.m <-
-        prophet::add_seasonality(prophet.m,
-                                 paste0('season_', period.ns),
-                                 period.ns,
-                                 fourier.order=2)
+  if (is.null(training$actual.upper)) {
+    training$actual.upper <- NA
+  }
+  if (short.term) {
+    training <- tail(training, n.history)
+    forecast <- head(forecast, n.forecast)
+    if (!is.null(evaluation)) {
+      evaluation <- head(evaluation, n.forecast)
+      evaluation$dt <- dt_format(evaluation$dt)
     }
   }
+
+  colnames(training) <- c('dt', 'value', 'value.lower', 'value.upper',
+                          'range.value.lower', 'range.value.upper',
+                          'range.uncertainty.lower', 'range.uncertainty.upper')
+  training$type <- "training"
+  color.idx <- c(3, 1)
   
+  forecast$type <- "forecast"
+  all <- rbind(training, forecast)
+  all$type <- factor(all$type, levels=c("training", "forecast"))
+  all$dt <- dt_format(all$dt)
+  all$idx <- c(1:nrow(all))
+  forecast$dt <- dt_format(forecast$dt)
+  forecast$idx  <- all$idx[all$dt %in% forecast$dt]
   
-  if (!is.null(x.reg) && !is.null(x.future)) {
-    for (x.reg.name in names(x.reg)){
-      history[paste0('x.reg.', x.reg.name)] <- x.reg[x.reg.name]
-      prophet.m <-
-        prophet::add_regressor(prophet.m, paste0('x.reg.', x.reg.name))
-      p.fcst.df[paste0('x.reg.', x.reg.name)] <-
-        x.future[x.reg.name]
-    }
-    
+  if (!is.null(evaluation)) {
+    evaluation$type <- "actuals"
+    color.idx <- c(2, 1, 3)
+    evaluation$idx <- all$idx[all$dt %in% evaluation$dt]
+  
   }
-  prophet.f <- prophet::fit.prophet(prophet.m, history)
-  p.fcst.df <- predict(prophet.f, p.fcst.df)
   
-  fcst.df <- data.frame(dt=fcst.dts.seq, forecast=p.fcst.df$yhat,
-                        forecast.lower=p.fcst.df$yhat_lower,
-                        forecast.upper=p.fcst.df$yhat_upper,
-                        se=(p.fcst.df$yhat_upper-p.fcst.df$yhat_lower)/
-                          (qnorm(0.5 + pred.level / 2)))
-  
-  if (!is.null(x.reg) && !is.null(x.future)) {
-    model.summary <- regressor_coefficients(prophet.f)
+  if (!short.term) {
+    # decide x-axis start year, end year and line width
+    min.year <- as.numeric(substr(dt_format(min(all$dt)), 1, 4))
+    min.year <- min.year + (dt_format(min(all$dt)) >=
+                            dt_format(paste0(min.year, "-07-01")))
+    min.year <- dt_format(paste0(min.year, "-01-01"))
+    max.year <- as.numeric(substr(dt_format(max(all$dt)), 1, 4))
+    max.year <- max.year + (dt_format(max(all$dt)) >=
+                            dt_format(paste0(max.year, "-07-01")))
+    max.year <- dt_format(paste0(max.year, "-01-01"))
+    dtbreaks <- seq(min.year, max.year, by="year")
   } else {
-    model.summary <- NULL
+    dtbreaks <- seq(min(training$dt), 
+                    max(forecast$dt), by=paste(freq, dt.units))
   }
   
-  model.summary <- rbind(model.summary,
-                         data.frame(regressor=c('trend'),
-                                    regressor_mode=c('additive'),
-                                    center=c(0),
-                                    coef_lower=p.fcst.df$trend_lower[2]-
-                                      p.fcst.df$trend_lower[1],
-                                    coef=p.fcst.df$trend[2]-
-                                      p.fcst.df$trend[1],
-                                    coef_upper=p.fcst.df$trend_upper[2]-
-                                      p.fcst.df$trend_upper[1]))
-  model.summary$se <- ((model.summary$coef_upper - model.summary$coef_lower) /
-                         (qnorm(0.5 + pred.level / 2)))
+  line.width <- 0.5 + (aggregated) * 0.5
+
+  freq.tmp <- ifelse(aggregated, paste("Aggregated to period", freq),
+                     "Unaggregated")
   
-  prophet.fitted <- predict(prophet.f, history)
+  dtbreaks.idx <- NULL
+  for (brk in dtbreaks) {
+    dtbreaks.idx <- c(dtbreaks.idx,
+                      which.min(abs(all$dt - dt_format(brk))))
+  }
   
-  fitted.df <- data.frame(dt=history$ds,
-                          predicted=prophet.fitted$yhat,
-                          residuals=history$y - prophet.fitted$yhat)
   
-  fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
-                                          box.cox.lambda=box.cox.lambda)
+  substr(freq.tmp, 1, 1) <- toupper(substr(freq.tmp, 1, 1))
+  title.name <- paste(freq.tmp, "Training and Forecast")
   
-  fcst.bcktrans$forecast$se <- NULL
   
-  return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
-              model.summary=model.summary, fitted=fitted.df))
+  p <- ggplot2::ggplot(data=all, ggplot2::aes(x=idx, y=value, color=type))
   
+  p <- p + ggplot2::geom_ribbon(data=forecast,
+                                ggplot2::aes(x=idx, ,
+                                             ymax=range.uncertainty.upper,
+                                             ymin=range.uncertainty.lower,
+                                             color=NULL),
+                                 alpha=0.2, color='transparent',
+                                size=line.width, fill='red')
+   
+  p <- p + ggplot2::geom_ribbon(data=forecast,
+                                ggplot2::aes(x=idx,
+                                             ymax=range.value.upper,
+                                             ymin=range.value.lower,
+                                             color=NULL),
+                                alpha=0.4, color='transparent',
+                                size=line.width, fill='red')
+  p <- p + ggplot2::geom_line(size=line.width)
+  if (!is.null(evaluation)) {
+    p <- p + ggplot2::geom_line(data=evaluation, ggplot2::aes(
+      x=idx, y=actual),
+      size=line.width, alpha=0.6)
+  }
+  p <- p +
+    ggplot2::scale_color_manual(values=scales::hue_pal()(3)[color.idx],
+                                name="") +
+    ggplot2::scale_x_continuous(breaks=dtbreaks.idx,
+                                labels=dtbreaks) +
+    
+    ggplot2::coord_cartesian(ylim=c(0.9 * min(training$value),
+                                    2* max(forecast$value))) +
+    ggplot2::xlab("") + ggplot2::ylab("") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(axis.text.x=ggplot2::element_text(size=15, face="bold"),
+                   axis.text.y=ggplot2::element_text(size=15, face="bold"),
+                   plot.title=ggplot2::element_text(size=20,
+                                                    vjust=2, face="bold"),
+                   legend.position="bottom",
+                   legend.text=ggplot2::element_text(size=15),
+                   legend.background=
+                     ggplot2::element_rect(fill = "transparent"),
+                   legend.key=ggplot2::element_rect(fill = "transparent"),
+                   legend.key.width=grid::unit(1.5, "cm")) +
+    ggplot2::theme(panel.border=ggplot2::element_blank(),
+                   panel.background=ggplot2::element_blank(),
+                   axis.line=ggplot2::element_line(color="grey"),
+                   panel.grid.major=
+                     ggplot2::element_line(color="#CCCCCC",
+                                           linetype="dashed"),
+                   panel.grid.minor=
+                     ggplot2::element_line(color="#DDDDDD",
+                                           linetype="dashed"))
+  print(p)
+
 }
 
-#' Option for forecasting (aggregated or disaggregated, long term or short
-#' term).  Finds the prophet logistic forecast.
+#' Function to plot error for two different forecast specifications
 #'
-#' @param history: dataframe containing fields for dt, actual, actual.lower,
-#'   actual.upper for forecasting
-#' @param fcst.dts: named vector containing start and end dt of forecast
-#' @param dt.units: units for the datetimes (dts) in the history, string
-#' @param dt.format: string giving a formatting function for the dts
-#' @param periods: length of seasonal period (in aggregated buckets of
-#' periods.agg)
-#' @param periods.agg: periods that training data (and forecast will be) are
-#'   aggregated over
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param pred.level: level for the prediction intervals
-#' @param transform: the transformation applied and thus the inverse to apply
-#'   to get forecast on the original scale
-#' @param box.cox.lambda: the value of the box cox lambda in the event the
-#'   transform is 'box_cox'
-#' @param x.reg: an optional dataframe of external regressors
-#' @param x.future an optional (but required if x.reg is not null) of future
-#'    external regressors
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @return: dataframe containing the dt, forecast, forecast lower prediction
-#'   limit and upper prediction limit
+#' @param object1: first clairvoyant forecast object to compare
+#' @param object2: second clairvoyant forecast object to compare
+#' @param label1: label for the first forecast specification
+#' @param label2: label for the 2nd forecast specification
+#' @param freq: the frequency of the error to plot (daily or weekly)
+#' @param short.term: whether to truncate to the first n.error measurements
+#' @param n.error: number of measurements to plot if truncating
+#' @param log.scale: boolean of whether to plot the error on the log scale
+#' @param dts.annotations: dataframe of events to annotate the plot
+#' @return: null, plot is produced
 #' @export
-ProphetLogistic <- function(history, fcst.dts,
-                            dt.units='days', dt.format='.AsPOSIXlt',
-                            periods=c(7), periods.agg=NULL, periods.trig=c(364),
-                            pred.level=0.8, transform='box_cox', box.cox.lambda=1,
-                            x.reg=NULL, x.future=NULL, holidays.df=NULL) {
-  
-  fcst.interval <- max(c(1, periods.agg))
-  dt_units <- get(dt.units)
-  fcst.dts.seq <- seq((fcst.dts$begin.dt + dt_units(fcst.interval - 1)),
-                      fcst.dts$end.dt, by=paste(fcst.interval, dt.units))
-  len.fcst <- length(fcst.dts.seq)
-  
-  colnames(history) <- c('ds', 'y', 'y.lower', 'y.upper')
-  # TODO: change this to a manipulable parameter
-  history$cap <- 10 * history$y
-  
-  if (!is.null(holidays.df)) {
-    holidays.df <- holidays.df[c('dt', 'holiday')]
-    colnames(holidays.df) <- c('ds', 'holiday')
-  }
-  all.periods <- fcst.interval * c(1, periods, periods.trig)
-  prophet.m <- prophet::prophet(history, fit=F,
-                                interval.width=pred.level,
-                                yearly.seasonality=(any(all.periods %in%
-                                                          c(364, 365))),
-                                holidays=holidays.df,
-                                #mcmc.samples=1000,
-                                changepoint.prior.scale=0.01)
-  
-  p.fcst.df <- data.frame(ds=fcst.dts.seq, cap=max(history$cap))
-  
-  periods.st <- c(1, 7, 364, 365, 24)
-  periods.g <- fcst.interval * c(periods, periods.trig)
-  
-  if (!(all(periods.g %in% periods.st))) {
-    for (period.ns in periods.g[!(periods.g %in% periods.st)]) {
-      prophet.m <-
-        prophet::add_seasonality(prophet.m,
-                                 paste0('season_', period.ns),
-                                 period.ns,
-                                 fourier.order=2)
+PlotErrorComparison <- function(object1, object2=NULL, label1='', label2='',
+                                aggregated=FALSE,
+                                freq=7, dt.format='as.POSIXct',
+                                short.term=T, n.error=14,
+                                log.scale=T, dts.annotations=NULL) {
+  if (aggregated) {
+    error1 <- object1$evaluation$aggregated[[paste(freq)]]
+    if (!is.null(object2)) {
+      error2 <- object2$evaluation$aggregated[[paste(freq)]]
+      error2$type <- label2
     }
-  }
-  
-  if (!is.null(x.reg) && !is.null(x.future)) {
-    for (x.reg.name in names(x.reg)){
-      history[paste0('x.reg.', x.reg.name)] <- x.reg[x.reg.name]
-      prophet.m <-
-        prophet::add_regressor(prophet.m, paste0('x.reg.', x.reg.name))
-      p.fcst.df[paste0('x.reg.', x.reg.name)] <-
-        x.future[x.reg.name]
-    }
-    
-  }
-  prophet.f <- prophet::fit.prophet(prophet.m, history)
-  p.fcst.df <- predict(prophet.f, p.fcst.df)
-  
-  fcst.df <- data.frame(dt=fcst.dts.seq, forecast=p.fcst.df$yhat,
-                        forecast.lower=p.fcst.df$yhat_lower,
-                        forecast.upper=p.fcst.df$yhat_upper,
-                        se=(p.fcst.df$yhat_upper-p.fcst.df$yhat_lower)/
-                          (qnorm(0.5 + pred.level / 2)))
-  
-  if (!is.null(x.reg) && !is.null(x.future)) {
-    model.summary <- regressor_coefficients(prophet.f)
   } else {
-    model.summary <- NULL
+    error1 <- object1$evaluation$unaggregated
+    if (!is.null(object2)) {
+      error2 <- object2$evaluation$unaggregated
+      error2$type <- label2
+    } else error2 <- NULL
   }
-  model.summary <- rbind(model.summary,
-                         data.frame(regressor=c('trend'),
-                                    regressor_mode=c('additive'),
-                                    center=c(0),
-                                    coef_lower=p.fcst.df$trend_lower[2]-
-                                      p.fcst.df$trend_lower[1],
-                                    coef=p.fcst.df$trend[2]-
-                                      p.fcst.df$trend[1],
-                                    coef_upper=p.fcst.df$trend_upper[2]-
-                                      p.fcst.df$trend_upper[1]))
-  model.summary$se <- ((model.summary$coef_upper - model.summary$coef_lower) /
-                         (qnorm(0.5 + pred.level / 2)))
-  
-  prophet.fitted <- predict(prophet.f, history)
-  
-  fitted.df <- data.frame(dt=history$ds,
-                          predicted=prophet.fitted$yhat,
-                          residuals=history$y - prophet.fitted$yhat)
-  
-  fcst.bcktrans <- .BackTransformForecast(fcst.df, transform=transform,
-                                          box.cox.lambda=box.cox.lambda)
-  
-  fcst.bcktrans$forecast$se <- NULL
-  
-  return(list(forecast=fcst.bcktrans$forecast, trans.forecast=fcst.df,
-              model.summary=model.summary, fitted=fitted.df))
-  
-}
+
+  error1$type <- label1
 
 
+  if (short.term) {
+    error1 <- head(error1, n.error)
+    error2 <- head(error2, n.error)
+  }
+  if (!is.null(dts.annotations)) {
+    if (class(dts.annotations) == 'character' &&
+        dts.annotations == 'DOW') {
+      dts.annotations <- data.frame(dt=error1$dt,
+                                    event=format(dt_format(error1$dt), '%a'))
+    }
+    dts.annotations <-
+        subset(dts.annotations, dt %in% c(error1$dt, error2$dt))
+    dts.annotations <- dts.annotations[order(dts.annotations$dt), ]
+    dts.annotations$error <-
+        subset(error1, dt %in% dts.annotations$dt)$error
 
-#' Function to get a consensus forecast from an ensemble of forecasts
-#'
-#' @param forecast.list: list of forecast dataframes (need to contain fields
-#'  for dt, forecast, forecast.lower, foreast.upper)
-#' @param consensus.method: function to apply to ensemble of forecasts
-#'  (pointwise)
-#' @return: a dataframe containing the consensus forecast
-#' @export
-GetConsensusForecast <- function(forecast.list, consensus.method='median') {
-  
-  if (length(forecast.list) == 1) return(forecast.list[[1]])
-  fcst.length <- length(forecast.list[[1]]$dt)
-  num.fcsts <- length(forecast.list)
-  fcst.mat <- fcst.upper.mat <- fcst.lower.mat <-
-    matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
-  
-  for (i in 1:num.fcsts) {
-    fcst.mat[, i] <- forecast.list[[i]]$forecast
-    fcst.upper.mat[, i] <- forecast.list[[i]]$forecast.upper
-    fcst.lower.mat[, i] <- forecast.list[[i]]$forecast.lower
   }
-  consensus_fun <- get(consensus.method)
-  fcst.consensus <- apply(fcst.mat, 1, consensus_fun, na.rm=T)
-  fcst.upper.consensus <- apply(fcst.upper.mat, 1, consensus_fun, na.rm=T)
-  fcst.lower.consensus <- apply(fcst.lower.mat, 1, consensus_fun, na.rm=T)
-  
-  consensus.forecast <- data.frame(dt=forecast.list[[1]]$dt,
-                                   forecast=fcst.consensus,
-                                   forecast.lower=fcst.lower.consensus,
-                                   forecast.upper=fcst.upper.consensus)
-  return(consensus.forecast)
-}
 
-#' Helper function to match the standard error to the forecast it corresponds
-#' to
-#'
-#' @param se.mat: matrix of standard errors for forecasts of each model in the
-#'  ensemble
-#' @param fcst: forecast for which to match the corresponding standard error
-#' @param fcst.mat matrix of forecasts from each model in the ensemble
-#' @noRd
-.MatchSe <- function(fcst, se.mat, fcst.mat) {
-  se.idx <- which.min(abs(fcst.mat - fcst))
-  se.fcst <- se.mat[se.idx]
-  if (is.null(se.fcst)) {
-    se.fcst <- NA
-  }
-  return(se.fcst)
-}
+  error.all <- rbind(error1, error2)
+  if (!is.null(error2)) {
+    error.all$type <- factor(error.all$type, levels=c(label1, label2))
+  } else error.all$type <- factor(error.all$type, levels=c(label1))
 
-#' Function to get a forecast sensitivty range from an ensemble of forecasts
-#'
-#' @param forecast.list: list of forecast dataframes (need to contain fields
-#'   for dt, forecast, forecast.lower, foreast.upper)
-#' @param lower.method: function to apply to ensemble of forecasts
-#'  (pointwise) to get the lower end of the forecast sensitivity range
-#' @param upper.method: function to apply to ensemble of forecasts
-#'  (pointwise) to get the upper end of the forecast sensitivity range
-#' @return: a dataframe containing the range forecast and uncertainty
-#' @export
-GetForecastRange <- function(forecast.list,
-                             lower.method='min', upper.method='max',
-                             pred.level=0.8, transform='none',
-                             box.cox.lambda=1) {
-  
-  cols.transf <- c("range.forecast.lower", "range.forecast.upper",
-                   "range.uncertainty.lower", "range.uncertainty.upper")
-  
-  if (length(forecast.list) == 1) {
-    forecast.range <- data.frame(dt=forecast.list[[1]]$dt)
-    forecast.range$range.forecast.lower <- forecast.list[[1]]$forecast
-    forecast.range$range.forecast.upper <- forecast.list[[1]]$forecast
-    forecast.range$range.uncertainty.lower <- forecast.list[[1]]$forecast.lower
-    forecast.range$range.uncertainty.upper <- forecast.list[[1]]$forecast.upper
-    
-    forecast.range <-
-      .BackTransformForecast(forecast.range, cols.transform=cols.transf,
-                             transform=transform,
-                             box.cox.lambda=box.cox.lambda)
-    return(forecast.range$forecast)
+  freq.tmp <- freq
+  substr(freq.tmp, 1, 1) <- toupper(substr(freq.tmp, 1, 1))
+  title.name <-
+      paste(freq.tmp, "Relative Forecast Error:",
+           "(forecast - truth) / truth \n")
+   if (label1 != '' || label2 != '') {
+     title.name <- paste(title.name, label1, 'vs', label2)
   }
-  fcst.length <- length(forecast.list[[1]]$dt)
-  num.fcsts <- length(forecast.list)
-  fcst.mat <- fcst.se.mat <-
-    matrix(rep(NA, fcst.length * num.fcsts), ncol=num.fcsts)
-  
-  for (i in 1:num.fcsts) {
-    fcst.mat[, i] <- forecast.list[[i]]$forecast
-    fcst.se.mat[, i] <- forecast.list[[i]]$se
+  p <- ggplot2::ggplot(data = error.all,
+                       ggplot2::aes(x=dt, y=error, color=type)) +
+    ggplot2::geom_hline(yintercept = 0, color = "grey", size = 1) +
+    ggplot2::geom_line(size = 1) +
+    ggplot2::scale_x_datetime(labels = scales::date_format("%Y-%m-%d")) +
+    ggplot2::xlab("") + ggplot2::ylab("") +
+    ggplot2::ggtitle(title.name) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 15, face = "bold"),
+      axis.text.y = ggplot2::element_text(size = 15, face = "bold"),
+      plot.title = ggplot2::element_text(size = 20, vjust = 2, face = "bold"),
+      legend.position = 'bottom',
+      legend.text = ggplot2::element_text(size = 15),
+      legend.title = ggplot2::element_blank(),
+      legend.background = ggplot2::element_rect(fill = "transparent"),
+      legend.key = ggplot2::element_rect(fill = "transparent"),
+      legend.key.width = grid::unit(1.5, "cm")
+    ) +
+    ggplot2::theme(
+      panel.border = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "grey"),
+      panel.grid.major = ggplot2::element_line(color = "#CCCCCC",
+                                               linetype = "dashed"),
+      panel.grid.minor = ggplot2::element_line(color = "#DDDDDD",
+                                               linetype = "dashed")
+    )
+  if (label1 == '' && label2 == '') {
+    p <- p + ggplot2::theme(legend.position = 'none')
   }
-  
-  lower_fun <- get(lower.method)
-  upper_fun <- get(upper.method)
-  range.fcst.lower <- apply(fcst.mat, 1, lower_fun, na.rm=T)
-  range.fcst.upper <- apply(fcst.mat, 1, upper_fun, na.rm=T)
-  
-  fcst.se.lower <- apply(as.matrix(range.fcst.lower, ncol=1), 1,
-                         .MatchSe, fcst.se.mat, fcst.mat)
-  
-  fcst.se.upper <- apply(as.matrix(range.fcst.upper, ncol=1), 1,
-                         .MatchSe, fcst.se.mat, fcst.mat)
-  forecast.range <- data.frame(dt=forecast.list[[1]]$dt,
-                               range.forecast.lower=range.fcst.lower,
-                               range.forecast.upper=range.fcst.upper,
-                               range.se.lower=fcst.se.lower,
-                               range.se.upper=fcst.se.upper)
-  
-  c.alphas <- apply(forecast.range, 1, GetAdjustedAlpha, alpha=(1-pred.level))
-  c.alphas <- as.vector(unlist(c.alphas))
-  
-  forecast.range$range.uncertainty.lower <-
-    (forecast.range$range.forecast.lower -
-       c.alphas * forecast.range$range.se.lower)
-  forecast.range$range.uncertainty.upper <-
-    (forecast.range$range.forecast.upper +
-       c.alphas * forecast.range$range.se.upper)
-  
-  forecast.range <-
-    .BackTransformForecast(forecast.range, cols.transform=cols.transf,
-                           transform=transform, box.cox.lambda=box.cox.lambda)
-  forecast.range <- forecast.range$forecast
-  forecast.range$c.alpha <- c.alphas
-  
-  return(forecast.range)
+  if (!is.null(dts.annotations)) {
+    p <- p +
+        ggplot2::geom_text(data=dts.annotations, size=6,
+                           vjust=-1 ^ c(1:nrow(dts.annotations)) * 0.5,
+                           ggplot2::aes(x=dt, y=error,
+                                        label=event, color=label1))
+  }
+  if (log.scale) {
+    custom_log_y_trans <- function() {
+    scales::trans_new(
+        "custom_log_y",
+         transform = function (x) (sign(x) * log(abs(x) + 1, 10)),
+         inverse = function (y) (sign(y) * (10 ^ (abs(y)) - 1)),
+         domain = c(-Inf, Inf))
+    }
+    errs.na <- error.all$error[!is.na(error.all$error)]
+    if (min(errs.na) < 0) {
+      y.min.less0 <- min(c(-1e-1, min(errs.na[errs.na < 0])))
+      y.max.less0 <- min(c(-1e-1, max(errs.na[errs.na < 0])))
+      y.breaks.less0 <-
+          c(round(log(-y.min.less0, 10)):round(log(-y.max.less0, 10)))
+      y.breaks.less0 <- - 10 ^ (y.breaks.less0)
+    } else y.breaks.less0 <- NULL
+    if (max(errs.na) > 0) {
+      y.min.greater0 <- max(c(1e-1, min(error.all$error[error.all$error > 0])))
+      y.max.greater0 <- max(c(1e-1, max(error.all$error[error.all$error > 0])))
+      y.breaks.great0 <-
+          c(round(log(y.min.greater0, 10)):round(log(y.max.greater0, 10)))
+      y.breaks.great0 <- 10 ^ (y.breaks.great0)
+    } else y.breaks.great0 <- NULL
+    y.breaks <- c(y.breaks.less0, y.breaks.great0)
+
+    p <- p + ggplot2::scale_y_continuous(
+        trans=custom_log_y_trans(),
+         limits=c(min(error.all$error, 0),
+         max(error.all$error, 0)), breaks=y.breaks)
+  } else {
+    p <- p + ylim(min(error.all$error, 0), max(error.all$error, 0))
+  }
+  print(p)
+
 }
