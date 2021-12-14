@@ -1,68 +1,3 @@
-
-#' Function to create needed hyperparameters for ensemble forecasting
-#'
-#' @param transform: the transformation applied to the data to find ensemble
-#'   forecast for
-#' @param periods: length of seasonal periods that are not aggregated over
-#'   or fit as trigonometric curves (in periods.trig)
-#' @param periods.trig: seasonal periods to fit trigonometric curves to as
-#'   external regressors
-#' @param models: vector of the model names included in the ensemble
-#' @param x.features: matrix of x.features to include as regressors in the
-#'   ensemble
-#' @param holidays.df a dataframe containing holidays to model as features
-#' @param consensus.method: the function applied to get the consensus forecast
-#' @param pred.level: confidence level for prediction/confidence interval
-#' @return: A list containing the hyperparameters needed to smooth events and
-#'   estimate their effects
-#' @export
-EnsembleParameters <- function(transform='none',
-                               periods=c(7),
-                               periods.trig=c(364),
-                               models=c('Arima011', 'Arima111', 'Arima013',
-                                        'Arima113',  'Arima112', 'Arima012',
-                                        'AutoArima', 'Bsts', 'ProphetLinear'),
-                               x.features=NULL,
-                               holidays.df=NULL,
-                               consensus.method='median',
-                               range.methods=c('LowerQuartile', 'UpperQuartile'),
-                               pred.level=0.8) {
-  ensemble.parameters <- list()
-  
-  stopifnot(tolower(transform) %in% c('log', 'box_cox', 'none'))
-  ensemble.parameters$transform <- tolower(transform)
-  
-  
-  stopifnot(is.null(periods.trig) ||
-              all(round(periods.trig) - periods.trig == 0))
-  ensemble.parameters$periods.trig <- periods.trig
-  
-  stopifnot(all(round(periods) - periods == 0))
-  # Remove any doubly specified periods (keep them in
-  #  periods trig because those are easier to fit models for)
-  periods <- periods[!(periods %in% periods.trig)]
-  ensemble.parameters$periods <- periods
-  
-  stopifnot(class(models) == 'character')
-  ensemble.parameters$models <- models
-  
-  #stopifnot(round(n.models.keep) - n.models.keep == 0)
-  #ensemble.parameters$n.models.keep <- n.models.keep
-  
-  stopifnot(is.null(x.features) || any(class(x.features) %in%
-                                         c('data.frame', 'matrix')))
-  ensemble.parameters$x.features <- x.features
-  
-  stopifnot(is.null(holidays.df) || any(class(holidays.df) %in%
-                                          c('data.frame', 'matrix')))
-  ensemble.parameters$holidays.df <- holidays.df
-  
-  stopifnot(consensus.method %in% c('median', 'mean', 'LowerQuartile',
-                                    'UpperQuartile'))
-  ensemble.parameters$consensus.method <- consensus.method
-  
-  stopifnot(length(range.methods) == 2 &&
-              all(range.methods %in% c('min', 'max',
 #' Function to get forecast error for the final daily and weekly forecasts and
 #'  booleans of whether the prediction interval covers the actual value
 #'
@@ -280,7 +215,7 @@ PlotEnsembleError <- function(object, dt.format='as.POSIXct') {
   all$dt <- dt_format(all$dt)
 
   title.name <-
-    "Training and forecast model ensemble"
+    "Error trajectories for the model ensemble"
   p <- ggplot2::ggplot(data=all, ggplot2::aes(x=dt, y=error, color=type)) +
     ggplot2::geom_line(size=all$line.width)
   p <- p + ggplot2::scale_x_datetime(breaks=dtbreaks,
@@ -420,8 +355,8 @@ PlotTrainingActualAndForecast <- function(object,
   
   p <- p + ggplot2::geom_ribbon(data=forecast,
                                 ggplot2::aes(x=idx, ,
-                                             ymax=range.uncertainty.upper,
-                                             ymin=range.uncertainty.lower,
+                                             ymax=value.upper,
+                                             ymin=value.lower,
                                              color=NULL),
                                  alpha=0.2, color='transparent',
                                 size=line.width, fill='red')
