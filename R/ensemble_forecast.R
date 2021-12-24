@@ -954,8 +954,8 @@ ProphetLinear <- function(history, fcst.dts,
                                 yearly.seasonality=(any(all.periods %in%
                                                           c(364, 365))),
                                 holidays=holidays.df,
-                                mcmc.samples=1000,
-                                changepoint.prior.scale=0.01)
+                                n.changepoints=floor(nrow(history) / 20),
+                                changepoint.prior.scale=0.03)
   
   p.fcst.df <- data.frame(ds=fcst.dts.seq)
   periods.st <- c(1, 7, 364, 365, 24)
@@ -1077,9 +1077,9 @@ ProphetLogistic <- function(history, fcst.dts,
                                 interval.width=pred.level,
                                 yearly.seasonality=(any(all.periods %in%
                                                           c(364, 365))),
-                                holidays=holidays.df,
-                                #mcmc.samples=1000,
-                                changepoint.prior.scale=0.01)
+                                holidays=holidays.df
+                                n.changepoints=floor(nrow(history) / 20),
+                                changepoint.prior.scale=0.03)
   
   p.fcst.df <- data.frame(ds=fcst.dts.seq, cap=max(history$cap))
   
@@ -1148,7 +1148,6 @@ ProphetLogistic <- function(history, fcst.dts,
               model.summary=model.summary, fitted=fitted.df))
   
 }
-
 
 
 #' Function to get a consensus forecast from an ensemble of forecasts
