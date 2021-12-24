@@ -138,11 +138,6 @@ UpperQuartile <- function(x, na.rm=TRUE) {
 #' Fix for prophet model regression coefficients extraction
 #'
 #' @param m: fitted prophet model
-#' @return: dataframe containing the
-#' @noRd
-#' Fix for prophet model regression coefficients extraction
-#'
-#' @param m: fitted prophet model
 #' @return: dataframe containing the regression coefficients
 #' @noRd
 regressor_coefficients <- function(m){
