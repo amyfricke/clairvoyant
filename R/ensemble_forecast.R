@@ -1077,7 +1077,7 @@ ProphetLogistic <- function(history, fcst.dts,
                                 interval.width=pred.level,
                                 yearly.seasonality=(any(all.periods %in%
                                                           c(364, 365))),
-                                holidays=holidays.df
+                                holidays=holidays.df,
                                 n.changepoints=floor(nrow(history) / 20),
                                 changepoint.prior.scale=0.03)
   
