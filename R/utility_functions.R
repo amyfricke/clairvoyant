@@ -140,6 +140,11 @@ UpperQuartile <- function(x, na.rm=TRUE) {
 #' @param m: fitted prophet model
 #' @return: dataframe containing the
 #' @noRd
+#' Fix for prophet model regression coefficients extraction
+#'
+#' @param m: fitted prophet model
+#' @return: dataframe containing the regression coefficients
+#' @noRd
 regressor_coefficients <- function(m){
   if (length(m$extra_regressors) == 0) {
     stop("No extra regressors found.")
@@ -149,9 +154,11 @@ regressor_coefficients <- function(m){
   regr_mus <- unlist(lapply(m$extra_regressors, function (x) x$mu))
   regr_stds <- unlist(lapply(m$extra_regressors, function(x) x$std))
 
-  beta_indices <- which(m$train.component.cols[, regr_names, drop = FALSE] == 1, arr.ind = TRUE)[, "row"]
+  beta_indices <- which(m$train.component.cols[, regr_names, drop = FALSE] == 1,
+                        arr.ind = TRUE)[, "row"]
   betas <- m$params$beta[, beta_indices, drop = FALSE]
-  # If regressor is additive, multiply by the scale factor to put coefficients on the original training data scale.
+  # If regressor is additive, multiply by the scale factor to put coefficients 
+  # on the original training data scale.
   y_scale_indicator <- matrix(
     data = ifelse(regr_modes == "additive", m$y.scale, 1),
     nrow = nrow(betas),
@@ -161,14 +168,14 @@ regressor_coefficients <- function(m){
   coefs <- betas * y_scale_indicator  / regr_stds
 
   percentiles = c((1 - m$interval.width) / 2, 1 - (1 - m$interval.width) / 2)
-  bounds <- apply(betas, 2, stats::quantile, probs = percentiles)
+  bounds <- apply(coefs, 2, stats::quantile, probs = percentiles)
 
   df <- data.frame(
     regressor = regr_names,
     regressor_mode = regr_modes,
     center = regr_mus,
     coef_lower = bounds[1, ],
-    coef = apply(betas, 2, mean),
+    coef = apply(coefs, 2, mean),
     coef_upper = bounds[2, ],
     stringsAsFactors = FALSE,
     row.names = NULL
