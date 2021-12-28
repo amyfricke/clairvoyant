@@ -1,9 +1,9 @@
 
-#' Function to set a list of Disaggregation parameters
+
+#' Function to set a list of Aggregation parameters
 #'
-#' @param aggregate.to.longest: whether to aggregate to the longest period
-#'   (models that can have <= 1 seasonal period, like arima, are then feasible)
 #' @param periods.agg: seasonal periods to aggregate over
+#' @param agg.fun: aggregation function for the timeseries being modelled
 #' @param fit.season.terms: whether to fit terms estimating seasonal effects to
 #'   the day of week proportions
 #' @param get.pred.int.daily: whether to get a prediction interval for predicted
@@ -12,28 +12,30 @@
 #'   interval
 #' @return: list of parameters for disaggregation to daily
 #' @export
-AggregationParameters <- function(aggregate.to.longest=FALSE,
-                                  periods.agg=NULL,
-                                  agg.fun='sum',
+AggregationParameters <- function(periods.agg=NULL,
+                                  agg.fun=c('sum'),
+                                  agg.fun.x.features=c('sum'),
                                   disaggregate.format=c('format'="%a"),
                                   fit.season.terms=TRUE,
                                   get.pred.int=TRUE,
                                   replicates=600) {
   aggregation.parameters <- list()
 
-  stopifnot(aggregate.to.longest %in% c(TRUE, FALSE))
-  aggregation.parameters$aggregate.to.longest <- aggregate.to.longest
 
   stopifnot(is.null(periods.agg) ||
             all(round(periods.agg) - periods.agg == 0))
-  if (is.null(periods.agg) || !aggregate.to.longest) {
+  if (is.null(periods.agg)) {
     aggregation.parameters$periods.agg <- c(1)
   } else {
     aggregation.parameters$periods.agg <- periods.agg
   }
 
-  stopifnot(agg.fun %in% c('sum', 'min', 'max', 'mean', 'median'))
+  stopifnot(all(agg.fun %in% c('sum', 'min', 'max', 'avg', 'median')))
   aggregation.parameters$agg.fun <- agg.fun
+
+  stopifnot(all(agg.fun.x.features %in% c('sum', 'min', 'max',
+                                          'avg', 'median')))
+  aggregation.parameters$agg.fun.x.features <- agg.fun.x.features
 
   stopifnot(all(is.na(disaggregate.format)) ||
             !is.null(names(disaggregate.format)))
@@ -50,33 +52,6 @@ AggregationParameters <- function(aggregate.to.longest=FALSE,
   return(aggregation.parameters)
 }
 
-#' Helper (internal) function to Aggregate a single period of history
-#'
-#' @param idx: index of the history to aggregate the prior week over
-#' @param agg.fun: aggregation function
-#' @param period: length of the period being aggregated
-#' @param history: dataframe of the daily history with dt and actual fields
-#' @param cols.agg: vector of column names to aggregate
-#' @return: one row data frame with aggregated history
-#' @noRd
-.AggOnePeriod <- function(idx, agg.fun='sum', period, history,
-                          cols.agg=c('actual', 'actual.lower',
-                                      'actual.upper')) {
-  agg.fun <- get(agg.fun)
-  if (period == 1) return(history[cols.agg][idx])
-  period.m1 <- period - 1
-  if (length(cols.agg) > 1) {
-    aggr <- apply(history[cols.agg][(idx - period.m1):idx,], 2, agg.fun)
-  } else if (length(cols.agg) == 1) {
-    aggr <- agg.fun(history[cols.agg][(idx - period.m1):idx,])
-    names(aggr) <- cols.agg
-  }
-  aggr <- as.data.frame(t(aggr))
-  aggr$dt <- history$dt[idx]
-  aggr <- aggr[, c(ncol(aggr), 1:length(cols.agg))]
-
-  return(aggr)
-}
 
 #' Function to Aggregate to the longest seasonal period buckets
 #'
@@ -88,44 +63,45 @@ AggregationParameters <- function(aggregate.to.longest=FALSE,
 #' @return: weekly.history: Data frame for weekly history
 AggregateToLongest <- function(history,
                                periods.agg=c(7),
-                               agg.fun='sum',
+                               agg.fun=c('sum'),
                                cols.agg=c('actual', 'actual.lower',
                                           'actual.upper'),
                                dt.format='.AsPOSIXlt') {
+
   periods.agg <- periods.agg[order(periods.agg)]
   periods.agg.new <- periods.agg / c(1, periods.agg[-length(periods.agg)])
-  unaggregated.history <- history
+  cols_agg <- gsub("[.]", "_", cols.agg)
+  unaggregated_history <- history
   aggregated.history.list <- list()
   period.m1 <- 1
   for (period in periods.agg) {
     period.m <- period / period.m1
-    n.unaggregated <- nrow(unaggregated.history)
-    p.i <- rep(c(period.m:1), ceiling(n.unaggregated / period.m))
-    p.i <- rev(p.i[1:n.unaggregated])
-    filter.p <- which(p.i == period.m)
-    filter.p <- filter.p[filter.p > (period.m - 1)]
+    colnames(unaggregated_history) <-
+      gsub("[.]", "_", colnames(unaggregated_history))
+    n.unaggregated <- nrow(unaggregated_history)
+    unaggregated_history$p_n <-
+      rep(c(1:ceiling(n.unaggregated / period.m)), each=period.m)
 
-    aggregated.history.tmp <- sapply(filter.p, .AggOnePeriod,
-                                     history=unaggregated.history,
-                                     agg.fun=agg.fun,
-                                     period=period.m,
-                                     cols.agg=cols.agg)
+    query.str <- paste0(paste(agg.fun, cols_agg, sep='('), collapse='), \n  ')
+    query.str <- paste0('select p_n, \n  max(dt), \n ', query.str, ') \n')
+    query.str <- paste0(query.str, 'from unaggregated_history \n',
+                        'group by 1 \n order by 2;')
+    aggregated.history.tmp <- sqldf::sqldf(query.str)
+    colnames(aggregated.history.tmp) <- c('p_n', 'dt', cols_agg)
 
-    aggregated.history.tmp <- data.frame(t(aggregated.history.tmp))
     dt_format <- get(dt.format)
-    aggregated.history <-
-      data.frame(dt = dt_format(unlist(aggregated.history.tmp$dt)))
-    for (i in 1:length(cols.agg)) {
-      aggregated.history[cols.agg[i]] <-
-         as.numeric(unlist(aggregated.history.tmp[cols.agg[i]]))
-    }
+    aggregated.history <- aggregated.history.tmp[, -c(1)]
+    colnames(aggregated.history) <- c('dt', cols.agg)
+    aggregated.history$dt <- dt_format(aggregated.history$dt)
+
     aggregated.history.list[[paste(period)]] <- aggregated.history
-    unaggregated.history <- aggregated.history
+    unaggregated_history <- aggregated.history
     period.m1 <- period
 
   }
   return(aggregated.history.list)
 }
+
 
 
 #' Function to get the multinomial model predictions to disaggregate an
@@ -446,4 +422,3 @@ DisaggregateForecast <- function(unaggregated.history,
   return(disaggregated.forecast)
 
 }
-
